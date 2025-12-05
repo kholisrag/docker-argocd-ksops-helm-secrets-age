@@ -1,0 +1,13 @@
+.act/
+.actrc
+.artifacts
+.github
+.gitignore
+.sops.yaml
+.vscode
+CODEOWNERS
+Dockerfile
+README.md
+e2e/
+temp/
+*.example

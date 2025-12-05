@@ -1,0 +1,61 @@
+configs:
+  cm:
+    timeout.reconciliation: 1d
+    helm.valuesFileSchemes: >-
+      secrets+age-import, secrets+age-import-kubernetes,
+      secrets,secrets+literal,
+      https, http, git+https
+    kustomize.buildOptions: "--enable-alpha-plugins --enable-exec"
+    resource.customizations: |-
+      argoproj.io/Application:
+        health.lua: |
+          hs = {}
+          hs.status = "Progressing"
+          hs.message = ""
+          if obj.status ~= nil then
+            if obj.status.health ~= nil then
+              hs.status = obj.status.health.status
+              if obj.status.health.message ~= nil then
+                hs.message = obj.status.health.message
+              end
+            end
+          end
+          return hs
+    application.resourceTrackingMethod: "annotation+label"
+repoServer:
+  rbac:
+    - apiGroups:
+        - ""
+      resources:
+        - secrets
+      verbs:
+        - get
+  env:
+    - name: HELM_SECRETS_DEBUG
+      value: "false"
+    - name: SOPS_AGE_KEY_FILE
+      value: "/.config/sops/age/keys.txt"
+    - name: NETRC
+      value: "/.netrc"
+  volumes:
+    - name: helm-secrets-private-keys
+      secret:
+        secretName: helm-secrets-private-keys
+    - name: netrc
+      secret:
+        secretName: helm-secrets-netrc
+  volumeMounts:
+    # Mount the Helm Secrets private keys for helm-secrets decryption
+    # ref: https://github.com/jkroepke/helm-secrets/wiki/ArgoCD-Integration#option-2-init-container
+    - mountPath: /helm-secrets-private-keys/
+      name: helm-secrets-private-keys
+    # ref: https://github.com/jkroepke/helm-secrets/wiki/Values
+    - mountPath: /.netrc
+      name: netrc
+      subPath: netrc
+
+    # Mount the SOPS AGE private keys for KSOPS decryption
+    # ref: https://github.com/viaduct-ai/kustomize-sops/tree/master?tab=readme-ov-file#argocdgitops-operator-w-ksopsagekey-in-okd4ocp4
+    - mountPath: /.config/sops/age
+      name: helm-secrets-private-keys
+      readOnly: true

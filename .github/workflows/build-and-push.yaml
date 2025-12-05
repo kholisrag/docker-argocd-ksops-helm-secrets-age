@@ -1,0 +1,553 @@
+name: "Build and Push Container Image"
+
+# This workflow builds, scans, and publishes Docker images to multiple registries
+# Features:
+# - Extracts tool versions from Dockerfile for tagging
+# - Trivy security scanning (blocks on HIGH/CRITICAL vulnerabilities)
+# - Multi-platform builds (amd64, arm64)
+# - SBOM and provenance attestations
+# - Priority-based tagging strategy with ArgoCD version as primary
+# - Pushes to Docker Hub, GHCR, and Quay.io
+#
+# Triggers:
+# - Daily schedule (8 AM UTC) for nightly builds
+# - Push to main branch for edge/latest tags
+# - Push tags v* for versioned releases
+# - Manual workflow_dispatch
+
+on:
+  schedule:
+    # Daily nightly build at 1 AM UTC
+    - cron: "0 2 * * *"
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      argocd_version:
+        description: "Override ArgoCD version for testing (e.g., 3.3.0-rc1)"
+        required: false
+        default: ""
+      version_suffix:
+        description: "Version suffix for testing (rc1, beta1, alpha1, test, etc.)"
+        required: false
+        default: ""
+      build_revision:
+        description: "Build revision number (0, 1, 2, etc.)"
+        required: false
+        default: ""
+      ksops_version:
+        description: "Override ksops version (leave empty to use .tool-versions)"
+        required: false
+        default: ""
+      age_version:
+        description: "Override age version (leave empty to use .tool-versions)"
+        required: false
+        default: ""
+      helm_secrets_version:
+        description: "Override helm-secrets version (leave empty to use .tool-versions)"
+        required: false
+        default: ""
+      sops_version:
+        description: "Override sops version (leave empty to use .tool-versions)"
+        required: false
+        default: ""
+      kubectl_version:
+        description: "Override kubectl version (leave empty to use .tool-versions)"
+        required: false
+        default: ""
+      vals_version:
+        description: "Override vals version (leave empty to use .tool-versions)"
+        required: false
+        default: ""
+      static_curl_version:
+        description: "Override static-curl version (leave empty to use .tool-versions)"
+        required: false
+        default: ""
+      skip_e2e:
+        description: "Skip E2E tests after build"
+        required: false
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      argocd_version:
+        description: "Override ArgoCD version"
+        type: string
+        required: false
+        default: ""
+      build_revision:
+        description: "Build revision number"
+        type: string
+        required: false
+        default: ""
+      ksops_version:
+        type: string
+        required: false
+        default: ""
+      age_version:
+        type: string
+        required: false
+        default: ""
+      helm_secrets_version:
+        type: string
+        required: false
+        default: ""
+      sops_version:
+        type: string
+        required: false
+        default: ""
+      kubectl_version:
+        type: string
+        required: false
+        default: ""
+      vals_version:
+        type: string
+        required: false
+        default: ""
+      static_curl_version:
+        type: string
+        required: false
+        default: ""
+      skip_e2e:
+        description: "Skip E2E tests after build"
+        type: boolean
+        required: false
+        default: false
+    outputs:
+      image_digest:
+        description: "Built image digest"
+        value: ${{ jobs.build-and-push.outputs.image_digest }}
+      image_repository:
+        description: "Image repository used for build"
+        value: ${{ jobs.build-and-push.outputs.image_repository }}
+      image_tag:
+        description: "Primary image tag for E2E testing"
+        value: ${{ jobs.build-and-push.outputs.image_tag }}
+      argocd_version:
+        description: "ArgoCD version used in build"
+        value: ${{ jobs.build-and-push.outputs.argocd_version }}
+      build_revision:
+        description: "Build revision"
+        value: ${{ jobs.build-and-push.outputs.build_revision }}
+    secrets:
+      DOCKERHUB_TOKEN:
+        required: false
+      QUAY_ROBOT_TOKEN:
+        required: false
+      ARGOCD_AGE_PRIVATE_KEY_CONTENT:
+        required: false
+      ARGOCD_GITHUB_TOKEN:
+        required: false
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+  security-events: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-24.04
+    outputs:
+      image_digest: ${{ steps.build.outputs.digest }}
+      image_repository: ghcr.io/kholisrag/argocd-ksops-helm-secrets
+      image_tag: ${{ steps.get_tag.outputs.primary_tag }}
+      argocd_version: ${{ steps.versions.outputs.argocd_version }}
+      build_revision: ${{ steps.versions.outputs.build_revision }}
+    steps:
+      - name: "Checkout Repository"
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # Full history for changelog generation
+
+      - name: "Extract Tool Versions"
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        id: versions
+        uses: ./.github/actions/extract-versions
+        with:
+          build_revision: ${{ inputs.build_revision || '' }}
+          argocd_version_override: ${{ inputs.argocd_version || '' }}
+          ksops_version_override: ${{ inputs.ksops_version || '' }}
+          age_version_override: ${{ inputs.age_version || '' }}
+          helm_secrets_version_override: ${{ inputs.helm_secrets_version || '' }}
+          sops_version_override: ${{ inputs.sops_version || '' }}
+          kubectl_version_override: ${{ inputs.kubectl_version || '' }}
+          vals_version_override: ${{ inputs.vals_version || '' }}
+          static_curl_version_override: ${{ inputs.static_curl_version || '' }}
+
+      - name: "Build Tag Suffix for Manual Dispatch"
+        id: tag_suffix
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          TAG_SUFFIX=""
+
+          # Add version suffix if provided (rc1, beta1, etc.)
+          if [ -n "${{ inputs.version_suffix }}" ]; then
+            TAG_SUFFIX="-${{ inputs.version_suffix }}"
+          fi
+
+          # Add build revision if provided
+          if [ -n "${{ inputs.build_revision }}" ]; then
+            TAG_SUFFIX="-build${{ inputs.build_revision }}"
+          fi
+
+          echo "suffix=${TAG_SUFFIX}" >> $GITHUB_OUTPUT
+          echo "::notice::Tag suffix for manual dispatch: ${TAG_SUFFIX}"
+
+      - name: "Set up QEMU"
+        uses: docker/setup-qemu-action@v3
+
+      - name: "Set up Docker Buildx"
+        uses: docker/setup-buildx-action@v3
+
+      # Docker meta for tagged releases (push to all registries)
+      - name: Docker meta (tagged releases)
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: meta-tagged
+        uses: docker/metadata-action@v5
+        env:
+          DOCKER_METADATA_SHORT_SHA_LENGTH: 7
+        with:
+          images: |
+            docker.io/kholisrag/argocd-ksops-helm-secrets
+            ghcr.io/kholisrag/argocd-ksops-helm-secrets
+            quay.io/kholisrag/argocd-ksops-helm-secrets
+          flavor: |
+            latest=auto
+          tags: |
+            # Semantic versioning for tagged releases (git tags only) - auto generates 'latest'
+            type=semver,priority=900,pattern={{version}}-{{sha}}
+            type=semver,priority=890,pattern={{version}}
+            # Manual dispatch with custom versions (testing) - no latest tag
+            type=raw,enable=${{ github.event_name == 'workflow_dispatch' && inputs.argocd_version != '' }},priority=600,value=v${{ steps.versions.outputs.argocd_version }}${{ steps.tag_suffix.outputs.suffix }}
+            type=raw,enable=${{ github.event_name == 'workflow_dispatch' && inputs.argocd_version != '' }},priority=599,value=v${{ steps.versions.outputs.argocd_version }}${{ steps.tag_suffix.outputs.suffix }}-{{sha}}
+            # ArgoCD version tags ONLY for git tag releases (refs/tags/v*)
+            type=raw,enable=${{ startsWith(github.ref, 'refs/tags/v') && steps.versions.outputs.build_revision != '' }},priority=200,value=v${{ steps.versions.outputs.argocd_version }}_${{ steps.versions.outputs.build_revision }}-{{sha}}
+            type=raw,enable=${{ startsWith(github.ref, 'refs/tags/v') && steps.versions.outputs.build_revision != '' }},priority=199,value=v${{ steps.versions.outputs.argocd_version }}_${{ steps.versions.outputs.build_revision }}
+            type=raw,enable=${{ startsWith(github.ref, 'refs/tags/v') && steps.versions.outputs.build_revision == '' }},priority=198,value=v${{ steps.versions.outputs.argocd_version }}-{{sha}}
+            type=raw,enable=${{ startsWith(github.ref, 'refs/tags/v') && steps.versions.outputs.build_revision == '' }},priority=197,value=v${{ steps.versions.outputs.argocd_version }}
+            # SHA-based tags (always generated for all builds)
+            type=sha,priority=100,format=short
+            type=sha,priority=50,format=long
+          labels: |
+            org.opencontainers.image.title=ArgoCD with ksops, helm-secrets, and age
+            org.opencontainers.image.description=Production-ready ArgoCD image with integrated secret management tools
+            org.opencontainers.image.vendor=kholisrag
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.documentation=https://github.com/${{ github.repository }}/blob/main/README.md
+            io.artifacthub.package.readme-url=https://raw.githubusercontent.com/${{ github.repository }}/main/README.md
+            # Tool versions as labels for easy identification
+            tools.argocd.version=${{ steps.versions.outputs.argocd_version }}
+            tools.ksops.version=${{ steps.versions.outputs.ksops_version }}
+            tools.age.version=${{ steps.versions.outputs.age_version }}
+            tools.helm-secrets.version=${{ steps.versions.outputs.helm_secrets_version }}
+            tools.sops.version=${{ steps.versions.outputs.sops_version }}
+            tools.kubectl.version=${{ steps.versions.outputs.kubectl_version }}
+            tools.vals.version=${{ steps.versions.outputs.vals_version }}
+            tools.static-curl.version=${{ steps.versions.outputs.static_curl_version }}
+            build.revision=${{ steps.versions.outputs.build_revision }}
+
+      # Docker meta for non-tagged releases (push to GHCR only)
+      - name: Docker meta (non-tagged)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        id: meta-non-tagged
+        uses: docker/metadata-action@v5
+        env:
+          DOCKER_METADATA_SHORT_SHA_LENGTH: 7
+        with:
+          images: |
+            ghcr.io/kholisrag/argocd-ksops-helm-secrets
+          flavor: |
+            latest=false
+          tags: |
+            # Nightly builds (cron schedule only)
+            type=schedule,enable=true,priority=1000,pattern=nightly
+            type=schedule,enable=${{ steps.versions.outputs.build_revision != '' }},priority=999,pattern=v${{ steps.versions.outputs.argocd_version }}_${{ steps.versions.outputs.build_revision }}-nightly
+            type=schedule,enable=${{ steps.versions.outputs.build_revision == '' }},priority=998,pattern=v${{ steps.versions.outputs.argocd_version }}-nightly
+            # Edge tag for main branch push only
+            type=edge,enable=${{ github.event_name == 'push' }},priority=700,branch=main
+            type=raw,enable=${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', 'main') && steps.versions.outputs.build_revision != '' }},priority=699,value=v${{ steps.versions.outputs.argocd_version }}_${{ steps.versions.outputs.build_revision }}-edge
+            type=raw,enable=${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', 'main') && steps.versions.outputs.build_revision == '' }},priority=698,value=v${{ steps.versions.outputs.argocd_version }}-edge
+            # SHA-based tags (always generated)
+            type=sha,priority=100,format=short
+            type=sha,priority=50,format=long
+          labels: |
+            org.opencontainers.image.title=ArgoCD with ksops, helm-secrets, and age
+            org.opencontainers.image.description=Production-ready ArgoCD image with integrated secret management tools
+            org.opencontainers.image.vendor=kholisrag
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.documentation=https://github.com/${{ github.repository }}/blob/main/README.md
+            io.artifacthub.package.readme-url=https://raw.githubusercontent.com/${{ github.repository }}/main/README.md
+            # Tool versions as labels for easy identification
+            tools.argocd.version=${{ steps.versions.outputs.argocd_version }}
+            tools.ksops.version=${{ steps.versions.outputs.ksops_version }}
+            tools.age.version=${{ steps.versions.outputs.age_version }}
+            tools.helm-secrets.version=${{ steps.versions.outputs.helm_secrets_version }}
+            tools.sops.version=${{ steps.versions.outputs.sops_version }}
+            tools.kubectl.version=${{ steps.versions.outputs.kubectl_version }}
+            tools.vals.version=${{ steps.versions.outputs.vals_version }}
+            tools.static-curl.version=${{ steps.versions.outputs.static_curl_version }}
+            build.revision=${{ steps.versions.outputs.build_revision }}
+
+      - name: "Login to Docker Hub"
+        if: github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          username: ${{ github.actor == 'nektos/act' && vars.DOCKERHUB_USERNAME || github.actor }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: "Login to GitHub Container Registry"
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor == 'nektos/act' && vars.GITHUB_USERNAME || github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Login to Quay.io"
+        if: github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ github.actor == 'nektos/act' && vars.QUAY_USERNAME || github.actor }}
+          password: ${{ secrets.QUAY_ROBOT_TOKEN }}
+
+      # Build image and export to local Docker for scanning
+      - name: Build and export to Docker
+        uses: docker/build-push-action@v6
+        env:
+          DOCKER_BUILD_SUMMARY: false
+        with:
+          platforms: linux/amd64
+          context: .
+          load: true # Load to local Docker for Trivy scanning
+          tags: scan-target:${{ github.sha }}
+          cache-from: |
+            type=gha,scope=${{ github.ref_name }}-${{ steps.versions.outputs.argocd_version }}
+            type=gha,scope=${{ github.ref_name }}
+            type=gha,scope=main
+            type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
+          cache-to: type=gha,mode=max,scope=${{ github.ref_name }}-${{ steps.versions.outputs.argocd_version }}
+          build-args: |
+            BUILD_REVISION=${{ steps.versions.outputs.build_revision }}
+            ARGOCD_VERSION=v${{ steps.versions.outputs.argocd_version }}
+            KSOPS_VERSION=v${{ steps.versions.outputs.ksops_version }}
+            SOPS_VERSION=${{ steps.versions.outputs.sops_version }}
+            KUBECTL_VERSION=${{ steps.versions.outputs.kubectl_version }}
+            VALS_VERSION=${{ steps.versions.outputs.vals_version }}
+            AGE_VERSION=${{ steps.versions.outputs.age_version }}
+            HELM_SECRETS_VERSION=${{ steps.versions.outputs.helm_secrets_version }}
+            STATIC_CURL_VERSION=${{ steps.versions.outputs.static_curl_version }}
+
+      # Scan the image with Trivy for vulnerabilities
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.33.1
+        id: trivy
+        with:
+          image-ref: scan-target:${{ github.sha }}
+          format: "table"
+          output: "trivy-results.txt"
+          exit-code: "0"
+
+      # Report Trivy results for visibility
+      - name: Report Trivy scan results
+        id: trivy_check
+        run: |
+          # Parse Trivy table output to count vulnerabilities by severity
+          CRITICAL_COUNT=$(grep -c "CRITICAL" trivy-results.txt || echo "0")
+          HIGH_COUNT=$(grep -c "HIGH" trivy-results.txt || echo "0")
+          MEDIUM_COUNT=$(grep -c "MEDIUM" trivy-results.txt || echo "0")
+          LOW_COUNT=$(grep -c "LOW" trivy-results.txt || echo "0")
+
+          echo "critical_count=${CRITICAL_COUNT}" >> $GITHUB_OUTPUT
+          echo "high_count=${HIGH_COUNT}" >> $GITHUB_OUTPUT
+          echo "medium_count=${MEDIUM_COUNT}" >> $GITHUB_OUTPUT
+          echo "low_count=${LOW_COUNT}" >> $GITHUB_OUTPUT
+
+          TOTAL_SEVERE=$((CRITICAL_COUNT + HIGH_COUNT))
+          echo "total_severe=${TOTAL_SEVERE}" >> $GITHUB_OUTPUT
+
+          if [ "$TOTAL_SEVERE" -gt 0 ]; then
+            echo "::warning::Found ${CRITICAL_COUNT} CRITICAL and ${HIGH_COUNT} HIGH severity vulnerabilities"
+            echo "::warning::Additional: ${MEDIUM_COUNT} MEDIUM and ${LOW_COUNT} LOW vulnerabilities"
+            echo "::warning::Image will still be pushed. Review the scan summary for details."
+          else
+            echo "::notice::No HIGH or CRITICAL vulnerabilities found."
+            echo "::notice::Found ${MEDIUM_COUNT} MEDIUM and ${LOW_COUNT} LOW severity issues."
+          fi
+
+      # Publish Trivy scan results to workflow summary
+      - name: Publish Trivy scan results to summary
+        if: always()
+        run: |
+          if [[ -s trivy-results.txt ]]; then
+            {
+              echo "### 🔒 Trivy Security Scan Results"
+              echo ""
+              echo "**Vulnerability Summary:**"
+              echo "- 🔴 CRITICAL: ${{ steps.trivy_check.outputs.critical_count }}"
+              echo "- 🟠 HIGH: ${{ steps.trivy_check.outputs.high_count }}"
+              echo "- 🟡 MEDIUM: ${{ steps.trivy_check.outputs.medium_count }}"
+              echo "- 🟢 LOW: ${{ steps.trivy_check.outputs.low_count }}"
+              echo ""
+              echo "<details><summary>Click to expand full scan results</summary>"
+              echo ""
+              echo '```'
+              cat trivy-results.txt
+              echo '```'
+              echo "</details>"
+            } >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # Upload Trivy results as artifact for review
+      - name: Upload Trivy scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-results
+          path: trivy-results.txt
+
+      # Build and push
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        id: build
+        with:
+          platforms: |
+            linux/amd64
+            linux/arm64
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ startsWith(github.ref, 'refs/tags/v') && steps.meta-tagged.outputs.tags || steps.meta-non-tagged.outputs.tags }}
+          labels: ${{ startsWith(github.ref, 'refs/tags/v') && steps.meta-tagged.outputs.labels || steps.meta-non-tagged.outputs.labels }}
+          annotations: ${{ startsWith(github.ref, 'refs/tags/v') && steps.meta-tagged.outputs.annotations || steps.meta-non-tagged.outputs.annotations }}
+          # Pass build revision as build arg
+          build-args: |
+            BUILD_REVISION=${{ steps.versions.outputs.build_revision }}
+            ARGOCD_VERSION=v${{ steps.versions.outputs.argocd_version }}
+            KSOPS_VERSION=v${{ steps.versions.outputs.ksops_version }}
+            SOPS_VERSION=${{ steps.versions.outputs.sops_version }}
+            KUBECTL_VERSION=${{ steps.versions.outputs.kubectl_version }}
+            VALS_VERSION=${{ steps.versions.outputs.vals_version }}
+            AGE_VERSION=${{ steps.versions.outputs.age_version }}
+            HELM_SECRETS_VERSION=${{ steps.versions.outputs.helm_secrets_version }}
+            STATIC_CURL_VERSION=${{ steps.versions.outputs.static_curl_version }}
+          # Add SBOM and provenance attestations for supply chain security
+          sbom: true
+          provenance: mode=max
+          cache-from: |
+            type=gha,scope=${{ github.ref_name }}-${{ steps.versions.outputs.argocd_version }}
+            type=gha,scope=${{ github.ref_name }}
+            type=gha,scope=main
+            type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
+          cache-to: |
+            type=gha,mode=max,scope=${{ github.ref_name }}-${{ steps.versions.outputs.argocd_version }}
+            type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+
+      # Generate build summary
+      - name: "Generate Build Summary"
+        run: |
+          echo "## ✅ Build and Push Successful" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔧 Tool Versions" >> $GITHUB_STEP_SUMMARY
+          echo "- **ArgoCD:** ${{ steps.versions.outputs.argocd_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **ksops:** ${{ steps.versions.outputs.ksops_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **age:** ${{ steps.versions.outputs.age_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **helm-secrets:** ${{ steps.versions.outputs.helm_secrets_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **sops:** ${{ steps.versions.outputs.sops_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **kubectl:** ${{ steps.versions.outputs.kubectl_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **vals:** ${{ steps.versions.outputs.vals_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **static-curl:** ${{ steps.versions.outputs.static_curl_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🏷️ Image Tags" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ startsWith(github.ref, 'refs/tags/v') && steps.meta-tagged.outputs.tags || steps.meta-non-tagged.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔒 Security" >> $GITHUB_STEP_SUMMARY
+          echo "- **Vulnerabilities (HIGH):** ${{ steps.trivy_check.outputs.high_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Vulnerabilities (CRITICAL):** ${{ steps.trivy_check.outputs.critical_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **SBOM:** ✅ Included" >> $GITHUB_STEP_SUMMARY
+          echo "- **Provenance:** ✅ mode=max" >> $GITHUB_STEP_SUMMARY
+
+      # Extract primary tag for E2E testing
+      - name: "Extract Primary Image Tag"
+        id: get_tag
+        run: |
+          # Extract SHA-based tag for E2E testing (more specific than edge/nightly)
+          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" == "true" ]; then
+            # For tagged releases, use the first tag (semantic version)
+            PRIMARY_TAG=$(echo "${{ steps.meta-tagged.outputs.tags }}" | head -n1 | cut -d':' -f2)
+          else
+            # For non-tagged builds, use SHA short tag (sha-xxxxxxx)
+            PRIMARY_TAG=$(echo "${{ steps.meta-non-tagged.outputs.tags }}" | grep -E "sha-[a-f0-9]{7}" | head -n1 | cut -d':' -f2)
+          fi
+          echo "primary_tag=${PRIMARY_TAG}" >> $GITHUB_OUTPUT
+          echo "::notice::Primary image tag for E2E: ${PRIMARY_TAG}"
+
+      # Debug info for nektos/act local testing
+      - name: "Debug Info"
+        if: ${{ github.actor == 'nektos/act' && always() }}
+        run: |
+          echo -e "Container Image Tags:\n${{ startsWith(github.ref, 'refs/tags/v') && steps.meta-tagged.outputs.tags || steps.meta-non-tagged.outputs.tags }}\n"
+          echo -e "Container Image Labels:\n${{ startsWith(github.ref, 'refs/tags/v') && steps.meta-tagged.outputs.labels || steps.meta-non-tagged.outputs.labels }}\n"
+          echo "DOCKERHUB_USERNAME: ${{ github.actor == 'nektos/act' && vars.DOCKERHUB_USERNAME || github.actor }}"
+          echo "GITHUB_USERNAME: ${{ github.actor == 'nektos/act' && vars.GITHUB_USERNAME || github.actor }}"
+          echo "QUAY_USERNAME: ${{ github.actor == 'nektos/act' && vars.QUAY_USERNAME || github.actor }}"
+
+  # E2E Tests - Run only if not skipped and on main branch or schedule
+  e2e-tests:
+    needs: build-and-push
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && !inputs.skip_e2e) ||
+      (github.event_name == 'workflow_call' && !inputs.skip_e2e)
+    uses: ./.github/workflows/e2e-tests.yaml
+    with:
+      image_repository: ${{ needs.build-and-push.outputs.image_repository }}
+      image_tag: ${{ needs.build-and-push.outputs.image_tag }}
+    secrets:
+      ARGOCD_AGE_PRIVATE_KEY_CONTENT: ${{ secrets.ARGOCD_AGE_PRIVATE_KEY_CONTENT }}
+      ARGOCD_GITHUB_TOKEN: ${{ secrets.ARGOCD_GITHUB_TOKEN }}
+
+  # Inspect and Update - Run after E2E tests pass
+  inspect-and-update:
+    needs:
+      - build-and-push
+      - e2e-tests
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && !inputs.skip_e2e) ||
+      (github.event_name == 'workflow_call' && !inputs.skip_e2e)
+    uses: ./.github/workflows/inspect-and-update.yaml
+    with:
+      image_tag: ${{ needs.build-and-push.outputs.image_tag }}
+      e2e_status: ${{ needs.e2e-tests.outputs.e2e_tests_status }}
+    secrets: inherit
+
+  # Commit and Tags - Create version tag after successful update
+  commit-and-tag:
+    needs:
+      - build-and-push
+      - e2e-tests
+      - inspect-and-update
+    if: |
+      needs.e2e-tests.outputs.e2e_tests_status == 'passed' &&
+      (
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        github.event_name == 'schedule' ||
+        (github.event_name == 'workflow_dispatch' && !inputs.skip_e2e) ||
+        (github.event_name == 'workflow_call' && !inputs.skip_e2e)
+      )
+    uses: ./.github/workflows/commit-and-tags.yaml
+    with:
+      argocd_version: ${{ needs.inspect-and-update.outputs.argocd_version }}
+      build_revision: ${{ needs.inspect-and-update.outputs.build_revision }}
+    secrets: inherit

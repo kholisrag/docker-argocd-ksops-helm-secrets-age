@@ -1,0 +1,281 @@
+name: "PR Validation and Build"
+
+# This workflow validates pull requests and builds release candidate images
+# Features:
+# - Validates PR title follows Conventional Commits format
+# - Builds RC (Release Candidate) images only if PR title is valid
+# - Pushes RC images only to GitHub Container Registry (GHCR)
+# - Comments on PR with image details and tool versions
+# - Calculates semantic version bump based on commit type
+#
+# Required PR title format: type(scope?): description
+# Valid types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert
+# Example: feat(api): add new authentication endpoint
+
+# Only run on pull requests to validate conventional commits and optionally build RC images
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  packages: write
+  pull-requests: write
+
+jobs:
+  # Validate that PR title follows conventional commit format
+  validate-conventional-commit:
+    runs-on: ubuntu-24.04
+    outputs:
+      semver_type: ${{ steps.semver.outputs.semver_type }}
+    steps:
+      - name: "Validate PR Title"
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Conventional commit types
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
+          # Require scope to be present (optional)
+          requireScope: false
+          # Subject may not be empty
+          subjectPattern: ^.+$
+          # Subject must not end with a period
+          subjectPatternError: |
+            The subject "{subject}" found in the pull request title "{title}"
+            doesn't match the configured pattern. Please ensure that the subject
+            doesn't end with a period and is not empty.
+          # Disable body validation since we only check PR title
+          validateSingleCommit: false
+          # Add comment on failure
+          ignoreLabels: |
+            ignore-semantic-pull-request
+
+      - name: "Determine Semver Type"
+        id: semver
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const title = context.payload.pull_request.title;
+
+            // Determine semver bump type from validated PR title
+            let semverType = 'patch';
+            if (title.includes('!') || title.match(/^(feat|fix)(\(.+\))?!/)) {
+              semverType = 'major';
+            } else if (title.startsWith('feat')) {
+              semverType = 'minor';
+            }
+
+            core.setOutput('semver_type', semverType);
+            core.notice(`Semver bump type: ${semverType}`);
+
+  # Build RC (release candidate) image only if PR title is valid
+  # Push only to GHCR, not to Docker Hub or Quay.io
+  build-rc-image:
+    runs-on: ubuntu-24.04
+    needs: validate-conventional-commit
+    outputs:
+      rc_version: ${{ steps.rc_tag.outputs.rc_version }}
+      image_tag: ${{ steps.get_tag.outputs.primary_tag }}
+    steps:
+      - name: "Checkout Repository"
+        uses: actions/checkout@v6
+
+      - name: "Extract Tool Versions"
+        id: versions
+        uses: ./.github/actions/extract-versions
+
+      - name: "Set up QEMU"
+        uses: docker/setup-qemu-action@v3
+
+      - name: "Set up Docker Buildx"
+        uses: docker/setup-buildx-action@v3
+
+      - name: "Login to GitHub Container Registry"
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Calculate Next Semver"
+        id: semver
+        uses: paulhatch/semantic-version@v5.4.0
+        with:
+          tag_prefix: "v"
+          major_pattern: "(MAJOR)"
+          minor_pattern: "(MINOR)"
+          version_format: "${major}.${minor}.${patch}"
+          bump_each_commit: false
+          search_commit_body: false
+          user_format_type: "csv"
+          # Use the semver type from PR validation
+          change_path: "."
+
+      - name: "Generate RC Version Tag"
+        id: rc_tag
+        run: |
+          # Get PR number
+          PR_NUMBER=${{ github.event.pull_request.number }}
+
+          # Generate RC version: next_version-rc.pr_number.sha_short
+          NEXT_VERSION="${{ steps.semver.outputs.version }}"
+          SHA_SHORT="${{ github.event.pull_request.head.sha }}"
+          SHA_SHORT="${SHA_SHORT:0:7}"
+
+          RC_VERSION="${NEXT_VERSION}-rc.${PR_NUMBER}.${SHA_SHORT}"
+
+          echo "rc_version=${RC_VERSION}" >> $GITHUB_OUTPUT
+          echo "::notice::RC Version: ${RC_VERSION}"
+
+      - name: "Docker Metadata for RC"
+        id: meta
+        uses: docker/metadata-action@v5
+        env:
+          DOCKER_METADATA_SHORT_SHA_LENGTH: 7
+        with:
+          images: |
+            ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ steps.rc_tag.outputs.rc_version }}
+            type=raw,value=pr-${{ github.event.pull_request.number }}
+          labels: |
+            org.opencontainers.image.title=ArgoCD with ksops, helm-secrets, and age (RC)
+            org.opencontainers.image.description=Release Candidate build from PR #${{ github.event.pull_request.number }}
+            org.opencontainers.image.version=${{ steps.rc_tag.outputs.rc_version }}
+            io.artifacthub.package.readme-url=https://raw.githubusercontent.com/${{ github.repository }}/main/README.md
+            # Tool versions as labels
+            tools.argocd.version=${{ steps.versions.outputs.argocd_version }}
+            tools.ksops.version=${{ steps.versions.outputs.ksops_version }}
+            tools.age.version=${{ steps.versions.outputs.age_version }}
+            tools.helm-secrets.version=${{ steps.versions.outputs.helm_secrets_version }}
+            tools.sops.version=${{ steps.versions.outputs.sops_version }}
+            tools.kubectl.version=${{ steps.versions.outputs.kubectl_version }}
+            tools.vals.version=${{ steps.versions.outputs.vals_version }}
+
+      - name: "Build and Push RC Image"
+        uses: docker/build-push-action@v6
+        id: build
+        with:
+          platforms: linux/amd64,linux/arm64
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          # Add SBOM and provenance attestations
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: "Extract Primary Image Tag"
+        id: get_tag
+        run: |
+          # Use RC version for E2E testing
+          echo "primary_tag=${{ steps.rc_tag.outputs.rc_version }}" >> $GITHUB_OUTPUT
+          echo "::notice::Primary image tag for E2E: ${{ steps.rc_tag.outputs.rc_version }}"
+
+      - name: "Comment on PR"
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const rcVersion = '${{ steps.rc_tag.outputs.rc_version }}';
+            const imageName = 'ghcr.io/${{ github.repository }}';
+
+            const comment = `## 🚀 Release Candidate Image Built
+
+            **Version:** \`${rcVersion}\`
+            **Image:** \`${imageName}:${rcVersion}\`
+
+            ### 🔧 Tool Versions
+            - ArgoCD: \`${{ steps.versions.outputs.argocd_version }}\`
+            - ksops: \`${{ steps.versions.outputs.ksops_version }}\`
+            - age: \`${{ steps.versions.outputs.age_version }}\`
+            - helm-secrets: \`${{ steps.versions.outputs.helm_secrets_version }}\`
+            - sops: \`${{ steps.versions.outputs.sops_version }}\`
+            - kubectl: \`${{ steps.versions.outputs.kubectl_version }}\`
+            - vals: \`${{ steps.versions.outputs.vals_version }}\`
+
+            ### 📦 Pull Command
+            \`\`\`bash
+            docker pull ${imageName}:${rcVersion}
+            \`\`\`
+
+            > ⚠️ This is a **Release Candidate** image for testing purposes only. It will not be promoted to production registries.
+            `;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  # Run E2E tests on the RC image
+  e2e-tests-rc:
+    needs: build-rc-image
+    uses: ./.github/workflows/e2e-tests.yaml
+    with:
+      image_tag: ${{ needs.build-rc-image.outputs.image_tag }}
+    secrets:
+      ARGOCD_AGE_PRIVATE_KEY_CONTENT: ${{ secrets.ARGOCD_AGE_PRIVATE_KEY_CONTENT }}
+      ARGOCD_GITHUB_TOKEN: ${{ secrets.ARGOCD_GITHUB_TOKEN }}
+
+  # Report E2E test results back to PR
+  report-e2e-results:
+    needs:
+      - build-rc-image
+      - e2e-tests-rc
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: "Comment E2E Results on PR"
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const rcVersion = '${{ needs.build-rc-image.outputs.rc_version }}';
+            const e2eStatus = '${{ needs.e2e-tests-rc.outputs.e2e_tests_status }}';
+            const imageName = 'ghcr.io/${{ github.repository }}';
+
+            let statusEmoji = '❌';
+            let statusText = 'Failed';
+            let statusColor = '🔴';
+
+            if (e2eStatus === 'passed') {
+              statusEmoji = '✅';
+              statusText = 'Passed';
+              statusColor = '🟢';
+            }
+
+            const comment = `## ${statusEmoji} E2E Test Results
+
+            **RC Version:** \`${rcVersion}\`
+            **Status:** ${statusColor} **${statusText}**
+
+            ### Test Details
+            - Image tested: \`${imageName}:${rcVersion}\`
+            - Workflow run: [View Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+            ${e2eStatus === 'passed' ? '### ✨ All Tests Passed\nThe RC image has successfully passed all E2E tests and is ready for review.' : '### ⚠️ Tests Failed\nThe RC image failed E2E tests. Please review the logs and fix any issues before merging.'}
+            `;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });

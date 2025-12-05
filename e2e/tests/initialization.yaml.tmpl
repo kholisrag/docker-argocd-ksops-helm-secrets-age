@@ -1,0 +1,75 @@
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  name: e2e-tests
+  namespace: argocd
+  labels:
+    e2etests: "true"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: E2E Tests Project
+  sourceRepos:
+    - "*"
+  destinations:
+    - namespace: "*"
+      server: https://kubernetes.default.svc.cluster.local
+      name: in-cluster
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    e2etests: "true"
+    argocd.argoproj.io/secret-type: repository
+  name: docker-argocd-ksops-helm-secrets-age-repo
+  namespace: argocd
+stringData:
+  type: git
+  url: https://github.com/kholisrag/docker-argocd-ksops-helm-secrets-age
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    e2etests: "true"
+    argocd.argoproj.io/secret-type: repo-creds
+  name: docker-argocd-ksops-helm-secrets-age-repo-creds
+  namespace: argocd
+stringData:
+  type: git
+  url: https://github.com/kholisrag/docker-argocd-ksops-helm-secrets-age
+  username: kholisrag
+  password: ${ARGOCD_GITHUB_TOKEN}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+    annotations:
+        argocd.argoproj.io/sync-wave: "-9"
+    name: e2e-test-kustomization
+    namespace: argocd
+    finalizers:
+        - resources-finalizer.argocd.argoproj.io
+spec:
+    project: e2e-tests
+    source:
+      repoURL: https://github.com/kholisrag/docker-argocd-ksops-helm-secrets-age
+      path: e2e/tests/manifests
+      targetRevision: main
+    destination:
+      namespace: argocd
+      name: in-cluster
+    syncPolicy:
+      automated:
+        selfHeal: true
+        prune: true
+      syncOptions:
+        - ApplyOutOfSyncOnly=true
+        - FailOnSharedResource=true

@@ -1,0 +1,45 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+  name: podinfo-helm
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: e2e-tests
+  source:
+    chart: podinfo
+    repoURL: https://stefanprodan.github.io/podinfo
+    targetRevision: 6.9.3
+    helm:
+      releaseName: podinfo
+      valueFiles:
+        - secrets+age-import:///helm-secrets-private-keys/keys.txt?https://raw.githubusercontent.com/kholisrag/docker-argocd-ksops-helm-secrets-age/main/e2e/tests/manifests/secrets-helm-secrets-sops-age.enc.yaml
+      valuesObject:
+        extraEnvs:
+          - name: USERNAME_KSOPS
+            valueFrom:
+              secretKeyRef:
+                name: podinfo-ksops-secrets
+                key: username
+          - name: PASSWORD_KSOPS
+            valueFrom:
+              secretKeyRef:
+                name: podinfo-ksops-secrets
+                key: password
+          - name: E2ETESTS
+            valueFrom:
+              configMapKeyRef:
+                name: podinfo-config
+                key: e2etests
+  destination:
+    name: in-cluster
+    namespace: podinfo
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - ServerSideApply=true
