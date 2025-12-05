@@ -1,0 +1,137 @@
+name: "Commit and Tags"
+
+# This workflow commits .tool-versions changes and creates tags
+# Triggered after successful E2E tests and version inspection
+
+on:
+  workflow_call:
+    inputs:
+      argocd_version:
+        description: "ArgoCD version for tag"
+        type: string
+        required: true
+      build_revision:
+        description: "Build revision (optional)"
+        type: string
+        required: false
+        default: ""
+    outputs:
+      tag_created:
+        description: "Whether a new tag was created"
+        value: ${{ jobs.commit-and-tag.outputs.tag_created }}
+      tag_name:
+        description: "Name of the created tag"
+        value: ${{ jobs.commit-and-tag.outputs.tag_name }}
+
+permissions:
+  contents: write
+
+jobs:
+  commit-and-tag:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag_created: ${{ steps.autotag.outputs.tagcreated }}
+      tag_name: ${{ steps.autotag.outputs.tagname }}
+    steps:
+      - name: "Create GitHub App Token"
+        uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.COMMITER_AND_TAGGER_APP_ID }}
+          private-key: ${{ secrets.COMMITER_AND_TAGGER_APP_PRIVATE_KEY }}
+
+      - name: "Checkout Repository"
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: "Get GitHub App User ID"
+        id: get-user-id
+        run: |
+          echo "user-id=$(gh api "/users/${{ steps.app-token.outputs.app-slug }}[bot]" --jq .id)" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: "Auto Commit .tool-versions Changes"
+        uses: stefanzweifel/git-auto-commit-action@v5
+        id: auto-commit
+        with:
+          commit_message: "chore: update .tool-versions after successful E2E tests [skip ci]"
+          commit_user_name: "${{ steps.app-token.outputs.app-slug }}[bot]"
+          commit_user_email: "${{ steps.get-user-id.outputs.user-id }}+${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com"
+          commit_author: "${{ steps.app-token.outputs.app-slug }}[bot] <${{ steps.get-user-id.outputs.user-id }}+${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com>"
+          file_pattern: ".tool-versions"
+          skip_dirty_check: false
+          skip_fetch: false
+          skip_checkout: false
+          disable_globbing: false
+          create_branch: false
+
+      - uses: benjlevesque/short-sha@v3.0
+        id: short-sha
+        with:
+          length: 7
+
+      - name: "Generate Tag Version"
+        id: tag-version
+        run: |
+          ARGOCD_VERSION="${{ inputs.argocd_version }}"
+          BUILD_REVISION="${{ inputs.build_revision }}"
+
+          if [ -n "${BUILD_REVISION}" ] && [ "${BUILD_REVISION}" != "null" ]; then
+            TAG_NAME="v${ARGOCD_VERSION}_${BUILD_REVISION}-${{ steps.short-sha.outputs.sha }}"
+          else
+            TAG_NAME="v${ARGOCD_VERSION}-${{ steps.short-sha.outputs.sha }}"
+          fi
+
+          echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+          echo "::notice::Will create tag: ${TAG_NAME}"
+
+      - name: "Create and Push Tag"
+        id: autotag
+        run: |
+          TAG_NAME="${{ steps.tag-version.outputs.tag_name }}"
+
+          # Check if tag already exists
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "tagcreated=no" >> $GITHUB_OUTPUT
+            echo "tagname=$TAG_NAME" >> $GITHUB_OUTPUT
+            echo "tagsha=$(git rev-parse $TAG_NAME)" >> $GITHUB_OUTPUT
+            echo "::notice::Tag $TAG_NAME already exists"
+          else
+            # Create and push the tag
+            git config user.name "${{ steps.app-token.outputs.app-slug }}[bot]"
+            git config user.email "${{ steps.get-user-id.outputs.user-id }}+${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com"
+            git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
+            git push origin "$TAG_NAME"
+
+            echo "tagcreated=yes" >> $GITHUB_OUTPUT
+            echo "tagname=$TAG_NAME" >> $GITHUB_OUTPUT
+            echo "tagsha=$(git rev-parse $TAG_NAME)" >> $GITHUB_OUTPUT
+            echo "::notice::Created and pushed tag $TAG_NAME"
+          fi
+
+      - name: "Generate Summary"
+        run: |
+          echo "## ✅ Commit and Tag Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ steps.auto-commit.outputs.changes_detected }}" == "true" ]; then
+            echo "### 📝 Changes Committed" >> $GITHUB_STEP_SUMMARY
+            echo "- Commit SHA: \`${{ steps.auto-commit.outputs.commit_hash }}\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ℹ️ No Changes" >> $GITHUB_STEP_SUMMARY
+            echo "- .tool-versions was already up to date" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ steps.autotag.outputs.tagcreated }}" == "yes" ]; then
+            echo "### 🏷️ Tag Created" >> $GITHUB_STEP_SUMMARY
+            echo "- Tag: \`${{ steps.autotag.outputs.tagname }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- SHA: \`${{ steps.autotag.outputs.tagsha }}\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ℹ️ Tag Already Exists" >> $GITHUB_STEP_SUMMARY
+            echo "- Tag: \`${{ steps.tag-version.outputs.tag_name }}\`" >> $GITHUB_STEP_SUMMARY
+          fi

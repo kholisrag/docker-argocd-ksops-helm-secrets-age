@@ -1,0 +1,134 @@
+name: "Extract Tool Versions"
+description: "Extract versions of ArgoCD, ksops, age, helm-secrets, and other tools from .tool-versions file with optional overrides"
+inputs:
+  build_revision:
+    description: "Custom build revision (empty by default, can be 0, 1, 2, -rc1, -beta1, etc.)"
+    required: false
+    default: ""
+  argocd_version_override:
+    description: "Override ArgoCD version from workflow input"
+    required: false
+    default: ""
+  ksops_version_override:
+    description: "Override ksops version from workflow input"
+    required: false
+    default: ""
+  age_version_override:
+    description: "Override age version from workflow input"
+    required: false
+    default: ""
+  helm_secrets_version_override:
+    description: "Override helm-secrets version from workflow input"
+    required: false
+    default: ""
+  sops_version_override:
+    description: "Override sops version from workflow input"
+    required: false
+    default: ""
+  kubectl_version_override:
+    description: "Override kubectl version from workflow input"
+    required: false
+    default: ""
+  vals_version_override:
+    description: "Override vals version from workflow input"
+    required: false
+    default: ""
+  static_curl_version_override:
+    description: "Override static-curl version from workflow input"
+    required: false
+    default: ""
+outputs:
+  argocd_version:
+    description: "ArgoCD version"
+    value: ${{ steps.extract.outputs.argocd_version }}
+  ksops_version:
+    description: "ksops version"
+    value: ${{ steps.extract.outputs.ksops_version }}
+  age_version:
+    description: "age version"
+    value: ${{ steps.extract.outputs.age_version }}
+  helm_secrets_version:
+    description: "helm-secrets version"
+    value: ${{ steps.extract.outputs.helm_secrets_version }}
+  sops_version:
+    description: "sops version"
+    value: ${{ steps.extract.outputs.sops_version }}
+  kubectl_version:
+    description: "kubectl version"
+    value: ${{ steps.extract.outputs.kubectl_version }}
+  vals_version:
+    description: "vals version"
+    value: ${{ steps.extract.outputs.vals_version }}
+  static_curl_version:
+    description: "static-curl version"
+    value: ${{ steps.extract.outputs.static_curl_version }}
+  build_revision:
+    description: "Build revision passed as input"
+    value: ${{ steps.extract.outputs.build_revision }}
+  all_versions_json:
+    description: "JSON object with all versions"
+    value: ${{ steps.extract.outputs.all_versions_json }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Extract versions from .tool-versions
+      id: extract
+      shell: bash
+      run: |
+        # Function to read version from .tool-versions
+        read_tool_version() {
+          local tool_name=$1
+          grep "^${tool_name} " .tool-versions | awk '{print $2}' | sed 's/^v//'
+        }
+
+        # Extract versions from .tool-versions or use overrides
+        ARGOCD_VERSION="${{ inputs.argocd_version_override }}"
+        KSOPS_VERSION="${{ inputs.ksops_version_override }}"
+        AGE_VERSION="${{ inputs.age_version_override }}"
+        HELM_SECRETS_VERSION="${{ inputs.helm_secrets_version_override }}"
+        SOPS_VERSION="${{ inputs.sops_version_override }}"
+        KUBECTL_VERSION="${{ inputs.kubectl_version_override }}"
+        VALS_VERSION="${{ inputs.vals_version_override }}"
+        STATIC_CURL_VERSION="${{ inputs.static_curl_version_override }}"
+
+        # Use .tool-versions if no override provided
+        [ -z "${ARGOCD_VERSION}" ] && ARGOCD_VERSION=$(read_tool_version "argocd")
+        [ -z "${KSOPS_VERSION}" ] && KSOPS_VERSION=$(read_tool_version "ksops")
+        [ -z "${AGE_VERSION}" ] && AGE_VERSION=$(read_tool_version "age")
+        [ -z "${HELM_SECRETS_VERSION}" ] && HELM_SECRETS_VERSION=$(read_tool_version "helm-secrets")
+        [ -z "${SOPS_VERSION}" ] && SOPS_VERSION=$(read_tool_version "sops")
+        [ -z "${KUBECTL_VERSION}" ] && KUBECTL_VERSION=$(read_tool_version "kubectl")
+        [ -z "${VALS_VERSION}" ] && VALS_VERSION=$(read_tool_version "vals")
+        [ -z "${STATIC_CURL_VERSION}" ] && STATIC_CURL_VERSION=$(read_tool_version "static-curl")
+
+        # Get build revision from input (default empty)
+        BUILD_REVISION="${{ inputs.build_revision }}"
+
+        # Create JSON object with all versions (compact, single line)
+        ALL_VERSIONS_JSON="{\"argocd\":\"${ARGOCD_VERSION}\",\"ksops\":\"${KSOPS_VERSION}\",\"age\":\"${AGE_VERSION}\",\"helm_secrets\":\"${HELM_SECRETS_VERSION}\",\"sops\":\"${SOPS_VERSION}\",\"kubectl\":\"${KUBECTL_VERSION}\",\"vals\":\"${VALS_VERSION}\",\"static_curl\":\"${STATIC_CURL_VERSION}\",\"build_revision\":\"${BUILD_REVISION}\"}"
+
+        # Output versions
+        echo "argocd_version=${ARGOCD_VERSION}" >> $GITHUB_OUTPUT
+        echo "ksops_version=${KSOPS_VERSION}" >> $GITHUB_OUTPUT
+        echo "age_version=${AGE_VERSION}" >> $GITHUB_OUTPUT
+        echo "helm_secrets_version=${HELM_SECRETS_VERSION}" >> $GITHUB_OUTPUT
+        echo "sops_version=${SOPS_VERSION}" >> $GITHUB_OUTPUT
+        echo "kubectl_version=${KUBECTL_VERSION}" >> $GITHUB_OUTPUT
+        echo "vals_version=${VALS_VERSION}" >> $GITHUB_OUTPUT
+        echo "static_curl_version=${STATIC_CURL_VERSION}" >> $GITHUB_OUTPUT
+        echo "build_revision=${BUILD_REVISION}" >> $GITHUB_OUTPUT
+        echo "all_versions_json=${ALL_VERSIONS_JSON}" >> $GITHUB_OUTPUT
+
+        # Log for debugging
+        echo "::notice::ArgoCD Version: ${ARGOCD_VERSION}"
+        echo "::notice::ksops Version: ${KSOPS_VERSION}"
+        echo "::notice::age Version: ${AGE_VERSION}"
+        echo "::notice::helm-secrets Version: ${HELM_SECRETS_VERSION}"
+        echo "::notice::sops Version: ${SOPS_VERSION}"
+        echo "::notice::kubectl Version: ${KUBECTL_VERSION}"
+        echo "::notice::vals Version: ${VALS_VERSION}"
+        echo "::notice::static-curl Version: ${STATIC_CURL_VERSION}"
+        if [ -n "${BUILD_REVISION}" ]; then
+          echo "::notice::Build Revision: ${BUILD_REVISION}"
+        fi

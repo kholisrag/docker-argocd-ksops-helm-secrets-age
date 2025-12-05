@@ -1,0 +1,377 @@
+name: "End to End Tests with Kind + ArgoCD"
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_repository:
+        description: "Repository of the ArgoCD image to be used in E2E tests"
+        required: false
+        default: "ghcr.io/kholisrag/argocd-ksops-helm-secrets"
+      image_tag:
+        description: "Tag of the ArgoCD image to be used in E2E tests"
+        required: true
+  workflow_call:
+    inputs:
+      image_repository:
+        description: "Repository of the ArgoCD image to be used in E2E tests"
+        type: string
+        required: false
+        default: "ghcr.io/kholisrag/argocd-ksops-helm-secrets"
+      image_tag:
+        description: "Tag of the ArgoCD image to be used in E2E tests"
+        type: string
+        required: true
+    outputs:
+      e2e_tests_status:
+        description: "E2E test status (passed/failed)"
+        value: ${{ jobs.e2e-tests.outputs.e2e_tests_status }}
+      image_tag:
+        description: "Image tag that was tested"
+        value: ${{ jobs.e2e-tests.outputs.image_tag }}
+    secrets:
+      ARGOCD_AGE_PRIVATE_KEY_CONTENT:
+        required: true
+      ARGOCD_GITHUB_TOKEN:
+        required: true
+      COMMITER_AND_TAGGER_APP_ID:
+        required: false
+      COMMITER_AND_TAGGER_APP_PRIVATE_KEY:
+        required: false
+
+jobs:
+  e2e-tests:
+    runs-on: ubuntu-24.04
+    outputs:
+      e2e_tests_status: ${{ steps.e2e-tests-outcome.outputs.e2e_tests_status }}
+      image_tag: ${{ inputs.image_tag }}
+    env:
+      ARGOCD_FLAGS: "--server localhost:8080 --insecure"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: "Extract Tool Versions"
+        id: versions
+        uses: ./.github/actions/extract-versions
+
+      - name: "Fetch Latest Stable Helm Version"
+        id: helm-version
+        run: |
+          HELM_VERSION=$(curl -s https://api.github.com/repos/helm/helm/releases/latest | jq -r '.tag_name')
+          echo "version=${HELM_VERSION}" >> $GITHUB_OUTPUT
+          echo "::notice::Latest Helm version: ${HELM_VERSION}"
+
+      - uses: azure/setup-helm@v4.3.0
+        id: install-helm
+        with:
+          version: "${{ steps.helm-version.outputs.version }}"
+
+      - name: Setup ArgoCD CLI
+        uses: imajeetyadav/argocd-cli@v1
+        with:
+          version: "v${{ steps.versions.outputs.argocd_version }}"
+
+      - name: Create k8s Kind Cluster
+        uses: helm/kind-action@v1.13.0
+        with:
+          cluster_name: e2e-tests-cluster
+          wait: 60s
+          verbosity: 3
+          install_only: false
+
+      - name: Verify Cluster Connection
+        run: |
+          echo "Verifying cluster connection..."
+          kubectl cluster-info
+          kubectl get nodes
+          kubectl config current-context
+          echo "Cluster is ready!"
+
+      - name: "Generate ArgoCD Prerequisite Manifest"
+        uses: danielr1996/envsubst-action@1.0.0
+        env:
+          ARGOCD_AGE_PRIVATE_KEY_CONTENT: ${{ secrets.ARGOCD_AGE_PRIVATE_KEY_CONTENT }}
+          ARGOCD_GITHUB_TOKEN: ${{ secrets.ARGOCD_GITHUB_TOKEN }}
+        with:
+          input: e2e/argocd/prerequisite.yaml.tmpl
+          output: e2e/argocd/prerequisite.yaml
+
+      - name: "Display Generated ArgoCD Prerequisite Manifest"
+        run: |
+          echo "Generated ArgoCD Prerequisite Manifest:"
+          cat e2e/argocd/prerequisite.yaml
+
+      - name: Install ArgoCD in Kind Cluster
+        run: |
+          echo "Applying ArgoCD Prerequisite Manifests"
+          kubectl apply -f ./e2e/argocd/prerequisite.yaml
+
+          echo "Waiting for namespace and secrets to be created"
+          kubectl wait --for=jsonpath='{.status.phase}'=Active namespace/argocd --timeout=10s
+
+          # Wait for secrets to exist
+          kubectl wait --for=create secret/helm-secrets-private-keys -n argocd --timeout=10s || true
+          kubectl wait --for=create secret/helm-secrets-netrc -n argocd --timeout=10s || true
+
+          echo "Prerequisites applied successfully!"
+
+          echo "Installing ArgoCD"
+          helm repo add argo https://argoproj.github.io/argo-helm
+          helm repo update
+
+          echo "Starting Helm install (this may take a few minutes for hooks to complete)..."
+          if ! helm upgrade --install argocd argo/argo-cd \
+            --namespace argocd \
+            --values ./e2e/argocd/values.yaml \
+            --set global.image.repository=${{ inputs.image_repository }} \
+            --set global.image.tag=${{ inputs.image_tag }} \
+            --timeout 1m \
+            --debug 2>&1; then
+            echo "::error::Helm install failed, checking resources..."
+          fi
+
+          echo "Waiting for ArgoCD components to be available"
+          echo "Checking all resources in argocd namespace:"
+          kubectl -n argocd get all
+
+          echo "Getting jobs in argocd namespace..."
+          kubectl -n argocd get jobs
+          echo "Describing redis-secret-init job..."
+          kubectl -n argocd describe job argocd-redis-secret-init
+          echo "Getting redis-secret-init pod..."
+          kubectl -n argocd get pods -l job-name=argocd-redis-secret-init
+          echo "Describing redis-secret-init pod..."
+          kubectl -n argocd describe pod -l job-name=argocd-redis-secret-init
+          echo "Getting redis-secret-init logs..."
+          kubectl -n argocd logs -l job-name=argocd-redis-secret-init --tail=100
+
+          # Wait with fallback to logs on failure
+          if ! kubectl -n argocd wait --for=condition=Ready pod -l app.kubernetes.io/name=argocd-redis --timeout=10s 2>&1; then
+            echo "::error::Redis pod failed to become ready"
+            kubectl -n argocd describe pod -l app.kubernetes.io/name=argocd-redis
+            kubectl -n argocd logs -l app.kubernetes.io/name=argocd-redis --tail=100
+          fi
+
+          if ! kubectl -n argocd wait --for=condition=Available deployment/argocd-applicationset-controller --timeout=10s 2>&1; then
+            echo "::error::ApplicationSet controller failed to become available"
+            kubectl -n argocd describe deployment argocd-applicationset-controller
+            kubectl -n argocd logs deployment/argocd-applicationset-controller --tail=100
+          fi
+
+          if ! kubectl -n argocd wait --for=condition=Available deployment/argocd-dex-server --timeout=10s 2>&1; then
+            echo "::error::Dex server failed to become available"
+            kubectl -n argocd describe deployment argocd-dex-server
+            kubectl -n argocd logs deployment/argocd-dex-server --tail=100
+          fi
+
+          if ! kubectl -n argocd wait --for=condition=Available deployment/argocd-notifications-controller --timeout=10s 2>&1; then
+            echo "::error::Notifications controller failed to become available"
+            kubectl -n argocd describe deployment argocd-notifications-controller
+            kubectl -n argocd logs deployment/argocd-notifications-controller --tail=100
+          fi
+
+          if ! kubectl -n argocd wait --for=condition=Available deployment/argocd-repo-server --timeout=10s 2>&1; then
+            echo "::error::Repo server failed to become available"
+            kubectl -n argocd describe deployment argocd-repo-server
+            kubectl -n argocd logs deployment/argocd-repo-server --tail=100
+          fi
+
+          if ! kubectl -n argocd wait --for=condition=Available deployment/argocd-server --timeout=10s 2>&1; then
+            echo "::error::ArgoCD server failed to become available"
+            kubectl -n argocd describe deployment argocd-server
+            kubectl -n argocd logs deployment/argocd-server --tail=100
+          fi
+
+          if ! kubectl -n argocd wait --for=condition=Ready pod -l app.kubernetes.io/name=argocd-application-controller --timeout=10s 2>&1; then
+            echo "::error::Application controller failed to become ready"
+            kubectl -n argocd describe pod -l app.kubernetes.io/name=argocd-application-controller
+            kubectl -n argocd logs -l app.kubernetes.io/name=argocd-application-controller --tail=100
+          fi
+
+          echo "All ArgoCD components are ready!"
+
+      - name: "Generate E2E Tests Initialization Manifest"
+        uses: danielr1996/envsubst-action@1.0.0
+        env:
+          ARGOCD_GITHUB_TOKEN: ${{ secrets.ARGOCD_GITHUB_TOKEN }}
+        with:
+          input: e2e/tests/initialization.yaml.tmpl
+          output: e2e/tests/initialization.yaml
+
+      - name: "Display Generated E2E Tests Initialization Manifest"
+        run: |
+          echo "Generated E2E Tests Initialization Manifest:"
+          cat e2e/tests/initialization.yaml
+
+      - name: Initialization of AppProjects and Applications in ArgoCD for E2E Tests
+        run: |
+          echo "Applying E2E Tests Initialization Manifest"
+          kubectl apply -f ./e2e/tests/initialization.yaml
+
+          echo "Waiting for Application resources to be created"
+          timeout=10
+          elapsed=0
+          while [ $elapsed -lt $timeout ]; do
+            if kubectl -n argocd get application/e2e-test-kustomization > /dev/null 2>&1; then
+              echo "e2e-test-kustomization application created"
+              break
+            fi
+            sleep 2
+            elapsed=$((elapsed + 2))
+          done
+
+          if [ $elapsed -ge $timeout ]; then
+            echo "Timeout waiting for e2e-test-kustomization application"
+          fi
+
+          echo "Applications created successfully"
+
+      - name: Wait for ArgoCD Application Sync
+        run: |
+          echo "Setting up ArgoCD CLI authentication"
+
+          # Get admin password
+          ARGOCD_PASSWORD=$(argocd admin initial-password -n argocd | head -n 1)
+
+          # Set up port-forward in background
+          kubectl port-forward svc/argocd-server -n argocd 8080:443 > /dev/null 2>&1 &
+          PORT_FORWARD_PID=$!
+          sleep 5
+
+          # Login to ArgoCD
+          argocd login localhost:8080 --username admin --password "$ARGOCD_PASSWORD" --insecure
+
+          echo "Checking e2e-test-kustomization sync status"
+          argocd app get e2e-test-kustomization ${ARGOCD_FLAGS}
+
+          echo "Checking podinfo-helm sync status"
+          argocd app get podinfo-helm ${ARGOCD_FLAGS}
+
+          # Clean up port-forward
+          kill $PORT_FORWARD_PID || true
+
+      - name: Debug ArgoCD Application Status
+        run: |
+          echo "Check Pods in all namespaces"
+          kubectl get pods -A --sort-by metadata.creationTimestamp | grep -vE 'ContainerCreating|Completed'
+
+          echo -e "\nCheck ArgoCD namespace details"
+          kubectl -n argocd get pods -o wide
+
+          echo -e "\nCheck images in ArgoCD Namespace"
+          kubectl -n argocd get pods -o jsonpath="{range .items[*]}{.metadata.name}:{range .spec.containers[*]}{.image}{'\n'}{end}{end}"
+
+          echo -e "\nChecking ArgoCD Application status"
+
+          # Get admin password
+          ARGOCD_PASSWORD=$(argocd admin initial-password -n argocd | head -n 1)
+
+          # Set up port-forward in background
+          kubectl port-forward svc/argocd-server -n argocd 8080:443 > /dev/null 2>&1 &
+          PORT_FORWARD_PID=$!
+          sleep 5
+
+          # Login to ArgoCD
+          argocd login localhost:8080 --username admin --password "$ARGOCD_PASSWORD" --insecure
+
+          # Get application details
+          echo "=== ArgoCD Application List ==="
+          argocd app list ${ARGOCD_FLAGS}
+
+          echo -e "\n=== e2e-test-kustomization Application Details ==="
+          argocd app get e2e-test-kustomization ${ARGOCD_FLAGS}
+
+          echo -e "\n=== podinfo-helm Application Details ==="
+          argocd app get podinfo-helm ${ARGOCD_FLAGS} || echo "podinfo-helm app not ready yet"
+
+          # Clean up port-forward
+          kill $PORT_FORWARD_PID || true
+
+      - name: Wait for Podinfo to be Synced and Healthy
+        id: check-replica-count
+        run: |
+          echo "Waiting for Podinfo to be Synced and Healthy"
+
+          echo "Waiting for podinfo namespace to be created"
+          kubectl wait --for=jsonpath='{.status.phase}'=Active namespace/podinfo --timeout=10s || true
+
+          echo "Waiting for podinfo deployment to be available"
+          kubectl -n podinfo wait --for=condition=Available deployment/podinfo --timeout=10s || true
+          kubectl -n podinfo get deployment podinfo
+          kubectl -n podinfo describe deployment podinfo
+          kubectl -n podinfo get pods -o wide
+          kubectl -n podinfo describe pod -l app.kubernetes.io/name=podinfo
+          kubectl -n podinfo wait svc/podinfo --for=condition=Available --timeout=30s || true
+          kubectl -n podinfo get svc/podinfo
+          kubectl -n podinfo describe svc/podinfo
+
+          echo "Check Replica Count of podinfo Deployment"
+          REPLICA_COUNT=$(kubectl -n podinfo get deployment podinfo -o jsonpath='{.status.readyReplicas}')
+          echo "Replica Count: $REPLICA_COUNT"
+          echo "replica_count=$REPLICA_COUNT" >> $GITHUB_OUTPUT
+
+      - name: Setup Kubernetes port-forward daemon
+        uses: vbem/k8s-port-forward@v1
+        with:
+          workload: "svc/podinfo"
+          mappings: "9898:9898"
+          options: "--namespace podinfo"
+          sleep: 5
+
+      - name: Check Injected Environment Variables in podinfo Application
+        id: check-injected-env
+        run: |
+          echo "Checking Injected Environment Variables in podinfo Application"
+          RESPONSE=$(curl -s http://localhost:9898/env)
+          echo -e "Response:\n$RESPONSE"
+          RESPONSE_JSON=$(echo "$RESPONSE" | jq -c '.')
+          echo "response_json=$RESPONSE_JSON" >> $GITHUB_OUTPUT
+
+      - name: Check Passing Status to Output
+        id: e2e-tests-outcome
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const replicaCount = parseInt('${{ steps.check-replica-count.outputs.replica_count }}', 10);
+            const responseArray = JSON.parse('${{ steps.check-injected-env.outputs.response_json }}');
+
+            // Convert array of "KEY=VALUE" strings to object
+            const responseJson = {};
+            responseArray.forEach(envVar => {
+              const [key, ...valueParts] = envVar.split('=');
+              responseJson[key] = valueParts.join('=');
+            });
+
+            let status = 'failed';
+
+            if (replicaCount === 2) {
+              console.log("Replica count check passed");
+              console.log("USERNAME_KSOPS:", responseJson['USERNAME_KSOPS']);
+              console.log("PASSWORD_KSOPS:", responseJson['PASSWORD_KSOPS']);
+              console.log("E2ETESTS:", responseJson['E2ETESTS']);
+
+              if (responseJson['USERNAME_KSOPS'] === 'podinfo-argocd-ksops-test' &&
+                responseJson['PASSWORD_KSOPS'] === '79J652_PSK4mlmnEVrbipviahmx8YhVeXrgwadme3avFih1NFaqWihadXlbvni06' &&
+                responseJson['E2ETESTS'] === 'GreedIsGood') {
+              console.log("Environment variables check passed");
+              status = 'passed';
+              } else {
+              console.log("Environment variables check failed");
+              }
+            } else {
+              console.log("Replica count check failed");
+            }
+
+            core.setOutput('e2e_tests_status', status);
+            console.log(`E2E Tests Status: ${status}`);
+
+      - name: "Generate E2E Tests Summary"
+        run: |
+          echo "## 🧪 E2E Tests Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ steps.e2e-tests-outcome.outputs.e2e_tests_status }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image Tag:** ${{ inputs.image_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "- Replica Count: ${{ steps.check-replica-count.outputs.replica_count }}/2" >> $GITHUB_STEP_SUMMARY
+          echo "- Environment Variables: ${{ steps.e2e-tests-outcome.outputs.e2e_tests_status == 'passed' && '✅ Passed' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,145 @@
+name: "Check Latest Tool Versions"
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+  workflow_call:
+    outputs:
+      has_updates:
+        description: "Whether updates were found"
+        value: ${{ jobs.check-versions.outputs.has_updates }}
+      updates_json:
+        description: "JSON object containing all latest tool versions"
+        value: ${{ jobs.check-versions.outputs.updates_json }}
+
+permissions:
+  contents: write
+
+jobs:
+  check-versions:
+    runs-on: ubuntu-24.04
+    outputs:
+      has_updates: ${{ steps.compare.outputs.has_updates }}
+      updates_json: ${{ steps.compare.outputs.updates_json }}
+    steps:
+      - name: "Checkout Repository"
+        uses: actions/checkout@v6
+
+      - name: "Extract Current Tool Versions"
+        id: current
+        uses: ./.github/actions/extract-versions
+
+      - name: "Fetch Latest ArgoCD Version"
+        id: latest_argocd
+        run: |
+          LATEST=$(curl -s https://api.github.com/repos/argoproj/argo-cd/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+          echo "version=${LATEST}" >> $GITHUB_OUTPUT
+          echo "::notice::Latest ArgoCD: ${LATEST}"
+
+      - name: "Fetch Latest ksops Version"
+        id: latest_ksops
+        run: |
+          LATEST=$(curl -s https://api.github.com/repos/viaduct-ai/kustomize-sops/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+          echo "version=${LATEST}" >> $GITHUB_OUTPUT
+          echo "::notice::Latest ksops: ${LATEST}"
+
+      - name: "Fetch Latest SOPS Version"
+        id: latest_sops
+        run: |
+          LATEST=$(curl -s https://api.github.com/repos/getsops/sops/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+          echo "version=${LATEST}" >> $GITHUB_OUTPUT
+          echo "::notice::Latest SOPS: ${LATEST}"
+
+      - name: "Fetch Latest kubectl Version"
+        id: latest_kubectl
+        run: |
+          LATEST=$(curl -s https://cdn.dl.k8s.io/release/stable.txt | sed 's/^v//')
+          echo "version=${LATEST}" >> $GITHUB_OUTPUT
+          echo "::notice::Latest kubectl: ${LATEST}"
+
+      - name: "Fetch Latest vals Version"
+        id: latest_vals
+        run: |
+          LATEST=$(curl -s https://api.github.com/repos/helmfile/vals/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+          echo "version=${LATEST}" >> $GITHUB_OUTPUT
+          echo "::notice::Latest vals: ${LATEST}"
+
+      - name: "Fetch Latest age Version"
+        id: latest_age
+        run: |
+          LATEST=$(curl -s https://api.github.com/repos/FiloSottile/age/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+          echo "version=${LATEST}" >> $GITHUB_OUTPUT
+          echo "::notice::Latest age: ${LATEST}"
+
+      - name: "Fetch Latest helm-secrets Version"
+        id: latest_helm_secrets
+        run: |
+          LATEST=$(curl -s https://api.github.com/repos/jkroepke/helm-secrets/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+          echo "version=${LATEST}" >> $GITHUB_OUTPUT
+          echo "::notice::Latest helm-secrets: ${LATEST}"
+
+      - name: "Fetch Latest static-curl Version"
+        id: latest_static_curl
+        run: |
+          LATEST=$(curl -s https://api.github.com/repos/moparisthebest/static-curl/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+          echo "version=${LATEST}" >> $GITHUB_OUTPUT
+          echo "::notice::Latest static-curl: ${LATEST}"
+
+      - name: "Compare Versions and Detect Updates"
+        id: compare
+        run: |
+          # Compare versions
+          HAS_UPDATES="false"
+          UPDATES=""
+
+          compare_version() {
+            local tool=$1
+            local current=$2
+            local latest=$3
+
+            if [ "$current" != "$latest" ]; then
+              echo "::notice::${tool}: ${current} -> ${latest}"
+              UPDATES="${UPDATES}${tool}: ${current} -> ${latest}\n"
+              HAS_UPDATES="true"
+            fi
+          }
+
+          compare_version "ArgoCD" "${{ steps.current.outputs.argocd_version }}" "${{ steps.latest_argocd.outputs.version }}"
+          compare_version "ksops" "${{ steps.current.outputs.ksops_version }}" "${{ steps.latest_ksops.outputs.version }}"
+          compare_version "SOPS" "${{ steps.current.outputs.sops_version }}" "${{ steps.latest_sops.outputs.version }}"
+          compare_version "kubectl" "${{ steps.current.outputs.kubectl_version }}" "${{ steps.latest_kubectl.outputs.version }}"
+          compare_version "vals" "${{ steps.current.outputs.vals_version }}" "${{ steps.latest_vals.outputs.version }}"
+          compare_version "age" "${{ steps.current.outputs.age_version }}" "${{ steps.latest_age.outputs.version }}"
+          compare_version "helm-secrets" "${{ steps.current.outputs.helm_secrets_version }}" "${{ steps.latest_helm_secrets.outputs.version }}"
+          compare_version "static-curl" "${{ steps.current.outputs.static_curl_version }}" "${{ steps.latest_static_curl.outputs.version }}"
+
+          echo "has_updates=${HAS_UPDATES}" >> $GITHUB_OUTPUT
+
+          # Create JSON with all versions for potential build trigger
+          UPDATES_JSON='{"argocd_version":"${{ steps.latest_argocd.outputs.version }}","ksops_version":"${{ steps.latest_ksops.outputs.version }}","sops_version":"${{ steps.latest_sops.outputs.version }}","kubectl_version":"${{ steps.latest_kubectl.outputs.version }}","vals_version":"${{ steps.latest_vals.outputs.version }}","age_version":"${{ steps.latest_age.outputs.version }}","helm_secrets_version":"${{ steps.latest_helm_secrets.outputs.version }}","static_curl_version":"${{ steps.latest_static_curl.outputs.version }}"}'
+          echo "updates_json=${UPDATES_JSON}" >> $GITHUB_OUTPUT
+
+          # Generate summary
+          echo "## 🔍 Version Check Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${HAS_UPDATES}" == "true" ]; then
+            echo "### ⬆️ Updates Available" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo -e "${UPDATES}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ✅ All tools are up to date" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Tool | Current | Latest |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|---------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ArgoCD | ${{ steps.current.outputs.argocd_version }} | ${{ steps.latest_argocd.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ksops | ${{ steps.current.outputs.ksops_version }} | ${{ steps.latest_ksops.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| SOPS | ${{ steps.current.outputs.sops_version }} | ${{ steps.latest_sops.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| kubectl | ${{ steps.current.outputs.kubectl_version }} | ${{ steps.latest_kubectl.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| vals | ${{ steps.current.outputs.vals_version }} | ${{ steps.latest_vals.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| age | ${{ steps.current.outputs.age_version }} | ${{ steps.latest_age.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| helm-secrets | ${{ steps.current.outputs.helm_secrets_version }} | ${{ steps.latest_helm_secrets.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| static-curl | ${{ steps.current.outputs.static_curl_version }} | ${{ steps.latest_static_curl.outputs.version }} |" >> $GITHUB_STEP_SUMMARY

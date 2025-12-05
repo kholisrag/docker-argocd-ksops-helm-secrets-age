@@ -1,0 +1,184 @@
+name: "Inspect Image and Update Tool Versions"
+
+# This workflow inspects a Docker image to extract tool versions from labels
+# and updates the .tool-versions file if the versions have changed
+
+on:
+  workflow_call:
+    inputs:
+      image_tag:
+        description: "Image tag to inspect"
+        type: string
+        required: true
+      e2e_status:
+        description: "E2E test status (passed/failed)"
+        type: string
+        required: true
+    outputs:
+      versions_updated:
+        description: "Whether .tool-versions was updated"
+        value: ${{ jobs.inspect-and-update.outputs.versions_updated }}
+      argocd_version:
+        description: "ArgoCD version from image"
+        value: ${{ jobs.inspect-and-update.outputs.argocd_version }}
+      build_revision:
+        description: "Build revision from image"
+        value: ${{ jobs.inspect-and-update.outputs.build_revision }}
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  inspect-and-update:
+    runs-on: ubuntu-24.04
+    outputs:
+      versions_updated: ${{ steps.check-changes.outputs.has_changes }}
+      argocd_version: ${{ steps.extract-labels.outputs.argocd_version }}
+      build_revision: ${{ steps.extract-labels.outputs.build_revision }}
+    steps:
+      - name: "Checkout Repository"
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: "Login to GitHub Container Registry"
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Inspect Image Labels"
+        id: extract-labels
+        run: |
+          # Pull and inspect the image to extract tool versions from labels
+          IMAGE="ghcr.io/kholisrag/argocd-ksops-helm-secrets:${{ inputs.image_tag }}"
+          echo "Inspecting image: ${IMAGE}"
+
+          # Pull the image manifest
+          docker pull ${IMAGE} --platform linux/amd64
+
+          # Extract labels using docker inspect
+          LABELS=$(docker inspect ${IMAGE} --format='{{json .Config.Labels}}')
+
+          # Extract individual versions from labels
+          ARGOCD_VERSION=$(echo "${LABELS}" | jq -r '.["tools.argocd.version"]')
+          KSOPS_VERSION=$(echo "${LABELS}" | jq -r '.["tools.ksops.version"]')
+          AGE_VERSION=$(echo "${LABELS}" | jq -r '.["tools.age.version"]')
+          HELM_SECRETS_VERSION=$(echo "${LABELS}" | jq -r '.["tools.helm-secrets.version"]')
+          SOPS_VERSION=$(echo "${LABELS}" | jq -r '.["tools.sops.version"]')
+          KUBECTL_VERSION=$(echo "${LABELS}" | jq -r '.["tools.kubectl.version"]')
+          VALS_VERSION=$(echo "${LABELS}" | jq -r '.["tools.vals.version"]')
+          STATIC_CURL_VERSION=$(echo "${LABELS}" | jq -r '.["tools.static-curl.version"]')
+          BUILD_REVISION=$(echo "${LABELS}" | jq -r '.["build.revision"]')
+
+          # Output versions
+          echo "argocd_version=${ARGOCD_VERSION}" >> $GITHUB_OUTPUT
+          echo "ksops_version=${KSOPS_VERSION}" >> $GITHUB_OUTPUT
+          echo "age_version=${AGE_VERSION}" >> $GITHUB_OUTPUT
+          echo "helm_secrets_version=${HELM_SECRETS_VERSION}" >> $GITHUB_OUTPUT
+          echo "sops_version=${SOPS_VERSION}" >> $GITHUB_OUTPUT
+          echo "kubectl_version=${KUBECTL_VERSION}" >> $GITHUB_OUTPUT
+          echo "vals_version=${VALS_VERSION}" >> $GITHUB_OUTPUT
+          echo "static_curl_version=${STATIC_CURL_VERSION}" >> $GITHUB_OUTPUT
+          echo "build_revision=${BUILD_REVISION}" >> $GITHUB_OUTPUT
+
+          # Create summary
+          echo "## 🔍 Extracted Tool Versions from Image" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${IMAGE}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Tool | Version |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ArgoCD | ${ARGOCD_VERSION} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ksops | ${KSOPS_VERSION} |" >> $GITHUB_STEP_SUMMARY
+          echo "| age | ${AGE_VERSION} |" >> $GITHUB_STEP_SUMMARY
+          echo "| helm-secrets | ${HELM_SECRETS_VERSION} |" >> $GITHUB_STEP_SUMMARY
+          echo "| sops | ${SOPS_VERSION} |" >> $GITHUB_STEP_SUMMARY
+          echo "| kubectl | ${KUBECTL_VERSION} |" >> $GITHUB_STEP_SUMMARY
+          echo "| vals | ${VALS_VERSION} |" >> $GITHUB_STEP_SUMMARY
+          echo "| static-curl | ${STATIC_CURL_VERSION} |" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${BUILD_REVISION}" ] && [ "${BUILD_REVISION}" != "null" ]; then
+            echo "| build-revision | ${BUILD_REVISION} |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: "Update .tool-versions File"
+        id: update-versions
+        run: |
+          # Create new .tool-versions file
+          cat > .tool-versions <<EOF
+          age ${{ steps.extract-labels.outputs.age_version }}
+          argocd ${{ steps.extract-labels.outputs.argocd_version }}
+          helm-secrets ${{ steps.extract-labels.outputs.helm_secrets_version }}
+          ksops ${{ steps.extract-labels.outputs.ksops_version }}
+          kubectl ${{ steps.extract-labels.outputs.kubectl_version }}
+          sops ${{ steps.extract-labels.outputs.sops_version }}
+          static-curl ${{ steps.extract-labels.outputs.static_curl_version }}
+          vals ${{ steps.extract-labels.outputs.vals_version }}
+          EOF
+
+          echo "✅ Updated .tool-versions file" >> $GITHUB_STEP_SUMMARY
+
+      - name: "Check for Changes"
+        id: check-changes
+        run: |
+          if git diff --quiet .tool-versions; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "ℹ️ No changes - .tool-versions already up to date" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## 📝 Changes Detected" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo '```diff' >> $GITHUB_STEP_SUMMARY
+            git diff .tool-versions >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: "Commit Changes"
+        if: steps.check-changes.outputs.has_changes == 'true' && inputs.e2e_status == 'passed'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        id: auto-commit
+        with:
+          commit_message: |
+            chore: update .tool-versions after successful E2E tests
+
+            Image: ghcr.io/kholisrag/argocd-ksops-helm-secrets:${{ inputs.image_tag }}
+            E2E Status: ${{ inputs.e2e_status }}
+
+            Tool Versions:
+            - ArgoCD: ${{ steps.extract-labels.outputs.argocd_version }}
+            - ksops: ${{ steps.extract-labels.outputs.ksops_version }}
+            - age: ${{ steps.extract-labels.outputs.age_version }}
+            - helm-secrets: ${{ steps.extract-labels.outputs.helm_secrets_version }}
+            - sops: ${{ steps.extract-labels.outputs.sops_version }}
+            - kubectl: ${{ steps.extract-labels.outputs.kubectl_version }}
+            - vals: ${{ steps.extract-labels.outputs.vals_version }}
+            - static-curl: ${{ steps.extract-labels.outputs.static_curl_version }}
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "github-actions[bot]@users.noreply.github.com"
+          commit_author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
+          file_pattern: ".tool-versions"
+          skip_dirty_check: false
+
+      - name: "Commit Summary"
+        if: steps.check-changes.outputs.has_changes == 'true' && inputs.e2e_status == 'passed'
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.auto-commit.outputs.changes_detected }}" == "true" ]; then
+            echo "✅ Changes committed: \`${{ steps.auto-commit.outputs.commit_hash }}\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "ℹ️ No changes to commit" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: "Skip Commit"
+        if: steps.check-changes.outputs.has_changes == 'false' || inputs.e2e_status != 'passed'
+        run: |
+          if [ "${{ inputs.e2e_status }}" != "passed" ]; then
+            echo "⚠️ Skipping commit - E2E tests did not pass" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "ℹ️ No changes to commit" >> $GITHUB_STEP_SUMMARY
+          fi

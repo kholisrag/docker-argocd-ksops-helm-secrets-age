@@ -1,0 +1,99 @@
+name: "Set Tool Versions"
+description: "Set versions of ArgoCD, ksops, age, helm-secrets, and other tools from .tool-versions file with optional Sets"
+inputs:
+  build_revision:
+    description: "Custom build revision (empty by default, can be 0, 1, 2, -rc1, -beta1, etc.)"
+    required: false
+    default: ""
+  argocd_version:
+    description: "Set ArgoCD version from workflow input"
+    required: true
+  ksops_version:
+    description: "Set ksops version from workflow input"
+    required: true
+  age_version:
+    description: "Set age version from workflow input"
+    required: true
+  helm_secrets_version:
+    description: "Set helm-secrets version from workflow input"
+    required: true
+  sops_version:
+    description: "Set sops version from workflow input"
+    required: true
+  kubectl_version:
+    description: "Set kubectl version from workflow input"
+    required: true
+  vals_version:
+    description: "Set vals version from workflow input"
+    required: true
+  static_curl_version:
+    description: "Set static-curl version from workflow input"
+    required: true
+
+outputs:
+  build_revision:
+    description: "Build revision"
+    value: ${{ inputs.build_revision }}
+  argocd_version:
+    description: "ArgoCD version"
+    value: ${{ inputs.argocd_version }}
+  ksops_version:
+    description: "ksops version"
+    value: ${{ inputs.ksops_version }}
+  age_version:
+    description: "age version"
+    value: ${{ inputs.age_version }}
+  helm_secrets_version:
+    description: "helm-secrets version"
+    value: ${{ inputs.helm_secrets_version }}
+  sops_version:
+    description: "sops version"
+    value: ${{ inputs.sops_version }}
+  kubectl_version:
+    description: "kubectl version"
+    value: ${{ inputs.kubectl_version }}
+  vals_version:
+    description: "vals version"
+    value: ${{ inputs.vals_version }}
+  static_curl_version:
+    description: "static-curl version"
+    value: ${{ inputs.static_curl_version }}
+  all_versions_json:
+    description: "All versions in JSON format"
+    value: |
+      {
+        "build_revision": "${{ inputs.build_revision }}",
+        "argocd_version": "${{ inputs.argocd_version }}",
+        "ksops_version": "${{ inputs.ksops_version }}",
+        "age_version": "${{ inputs.age_version }}",
+        "helm_secrets_version": "${{ inputs.helm_secrets_version }}",
+        "sops_version": "${{ inputs.sops_version }}",
+        "kubectl_version": "${{ inputs.kubectl_version }}",
+        "vals_version": "${{ inputs.vals_version }}",
+        "static_curl_version": "${{ inputs.static_curl_version }}"
+      }
+  success:
+    description: "Indicates if versions were set successfully"
+    value: "false"
+
+runs:
+  using: "composite"
+  steps:
+    - name: "Modify .tool-versions File"
+      shell: bash
+      id: modify-tool-versions
+      run: |
+        echo "Setting tool versions in .tool-versions file"
+        cat > .tool-versions <<EOF
+        age ${{ inputs.age_version }}
+        argocd ${{ inputs.argocd_version }}
+        helm-secrets ${{ inputs.helm_secrets_version }}
+        ksops ${{ inputs.ksops_version }}
+        kubectl ${{ inputs.kubectl_version }}
+        sops ${{ inputs.sops_version }}
+        static-curl ${{ inputs.static_curl_version }}
+        vals ${{ inputs.vals_version }}
+
+        EOF
+        echo "Modified .tool-versions file:"
+        cat .tool-versions

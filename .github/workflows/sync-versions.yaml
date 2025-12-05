@@ -1,0 +1,145 @@
+name: "Sync Tool Versions"
+
+# This workflow synchronizes tool versions from .tool-versions to Dockerfile
+# It reads versions from .tool-versions (source of truth) and updates
+# the ARG declarations in Dockerfile to match.
+#
+# Trigger: Manual workflow_dispatch only
+# Purpose: Keep Dockerfile defaults in sync with .tool-versions
+
+on:
+  workflow_dispatch:
+  # Optional: Auto-run when .tool-versions changes
+  push:
+    paths:
+      - .tool-versions
+
+permissions:
+  contents: write
+
+jobs:
+  sync-versions:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: "Create GitHub App Token"
+        uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.COMMITER_AND_TAGGER_APP_ID }}
+          private-key: ${{ secrets.COMMITER_AND_TAGGER_APP_PRIVATE_KEY }}
+
+      - name: "Checkout Repository"
+        uses: actions/checkout@v6
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: "Read Versions from .tool-versions"
+        id: read_versions
+        run: |
+          echo "## 📖 Reading versions from .tool-versions" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Function to read version from .tool-versions
+          read_tool_version() {
+            local tool_name=$1
+            grep "^${tool_name} " .tool-versions | awk '{print $2}'
+          }
+
+          # Read all versions
+          ARGOCD_VERSION=$(read_tool_version "argocd")
+          KSOPS_VERSION=$(read_tool_version "ksops")
+          AGE_VERSION=$(read_tool_version "age")
+          HELM_SECRETS_VERSION=$(read_tool_version "helm-secrets")
+          SOPS_VERSION=$(read_tool_version "sops")
+          KUBECTL_VERSION=$(read_tool_version "kubectl")
+          VALS_VERSION=$(read_tool_version "vals")
+          STATIC_CURL_VERSION=$(read_tool_version "static-curl")
+
+          # Display versions in summary
+          echo "- **ArgoCD:** ${ARGOCD_VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "- **ksops:** ${KSOPS_VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "- **age:** ${AGE_VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "- **helm-secrets:** ${HELM_SECRETS_VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "- **sops:** ${SOPS_VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "- **kubectl:** ${KUBECTL_VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "- **vals:** ${VALS_VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "- **static-curl:** ${STATIC_CURL_VERSION}" >> $GITHUB_STEP_SUMMARY
+
+          # Save to outputs
+          echo "argocd=${ARGOCD_VERSION}" >> $GITHUB_OUTPUT
+          echo "ksops=${KSOPS_VERSION}" >> $GITHUB_OUTPUT
+          echo "age=${AGE_VERSION}" >> $GITHUB_OUTPUT
+          echo "helm_secrets=${HELM_SECRETS_VERSION}" >> $GITHUB_OUTPUT
+          echo "sops=${SOPS_VERSION}" >> $GITHUB_OUTPUT
+          echo "kubectl=${KUBECTL_VERSION}" >> $GITHUB_OUTPUT
+          echo "vals=${VALS_VERSION}" >> $GITHUB_OUTPUT
+          echo "static_curl=${STATIC_CURL_VERSION}" >> $GITHUB_OUTPUT
+
+      - name: "Sync Versions to Dockerfile"
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 🔄 Syncing to Dockerfile" >> $GITHUB_STEP_SUMMARY
+
+          # Update Dockerfile ARG declarations to match .tool-versions
+          sed -i.bak "s/^ARG ARGOCD_VERSION=.*/ARG ARGOCD_VERSION=\"v${{ steps.read_versions.outputs.argocd }}\"/" Dockerfile
+          sed -i.bak "s/^ARG KSOPS_VERSION=.*/ARG KSOPS_VERSION=\"v${{ steps.read_versions.outputs.ksops }}\"/" Dockerfile
+          sed -i.bak "s/^ARG SOPS_VERSION=.*/ARG SOPS_VERSION=${{ steps.read_versions.outputs.sops }}/" Dockerfile
+          sed -i.bak "s/^ARG KUBECTL_VERSION=.*/ARG KUBECTL_VERSION=${{ steps.read_versions.outputs.kubectl }}/" Dockerfile
+          sed -i.bak "s/^ARG VALS_VERSION=.*/ARG VALS_VERSION=${{ steps.read_versions.outputs.vals }}/" Dockerfile
+          sed -i.bak "s/^ARG AGE_VERSION=.*/ARG AGE_VERSION=${{ steps.read_versions.outputs.age }}/" Dockerfile
+          sed -i.bak "s/^ARG HELM_SECRETS_VERSION=.*/ARG HELM_SECRETS_VERSION=${{ steps.read_versions.outputs.helm_secrets }}/" Dockerfile
+          sed -i.bak "s/^ARG STATIC_CURL_VERSION=.*/ARG STATIC_CURL_VERSION=${{ steps.read_versions.outputs.static_curl }}/" Dockerfile
+
+          # Clean up backup files
+          rm -f Dockerfile.bak
+
+          echo "✅ Dockerfile ARG declarations updated" >> $GITHUB_STEP_SUMMARY
+
+      - name: "Check for Changes"
+        id: check_changes
+        run: |
+          if git diff --quiet Dockerfile; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "ℹ️ No changes needed - Dockerfile already in sync" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## 📝 Changes Detected" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo '```diff' >> $GITHUB_STEP_SUMMARY
+            git diff Dockerfile >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: "Get GitHub App User ID"
+        if: steps.check_changes.outputs.has_changes == 'true'
+        id: get-user-id
+        run: |
+          echo "user-id=$(gh api "/users/${{ steps.app-token.outputs.app-slug }}[bot]" --jq .id)" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: "Commit and Push Changes"
+        if: steps.check_changes.outputs.has_changes == 'true'
+        run: |
+          git config --local user.name '${{ steps.app-token.outputs.app-slug }}[bot]'
+          git config --local user.email '${{ steps.get-user-id.outputs.user-id }}+${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com'
+          git add Dockerfile
+          git commit -m "chore: sync Dockerfile versions with .tool-versions
+
+          - ArgoCD: ${{ steps.read_versions.outputs.argocd }}
+          - ksops: ${{ steps.read_versions.outputs.ksops }}
+          - age: ${{ steps.read_versions.outputs.age }}
+          - helm-secrets: ${{ steps.read_versions.outputs.helm_secrets }}
+          - sops: ${{ steps.read_versions.outputs.sops }}
+          - kubectl: ${{ steps.read_versions.outputs.kubectl }}
+          - vals: ${{ steps.read_versions.outputs.vals }}
+          - static-curl: ${{ steps.read_versions.outputs.static_curl }}
+
+
+          skip-checks: true"
+          git push
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Changes committed and pushed to main branch" >> $GITHUB_STEP_SUMMARY

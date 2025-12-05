@@ -1,0 +1,169 @@
+name: "Create Release"
+
+# This workflow creates GitHub releases with comprehensive release notes
+# Features:
+# - Generates changelog from conventional commits
+# - Creates release notes with tool versions and pull commands
+# - Publishes changelog to repository
+# - Creates GitHub release with artifacts
+# - Marks pre-releases automatically (tags with -rc, -alpha, -beta)
+#
+# Triggered when a new tag matching v* is pushed
+# Example: git tag -a v1.2.3 -m "Release v1.2.3" && git push origin v1.2.3
+
+# Triggered when a new tag is pushed
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  create-release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: "Create GitHub App Token"
+        uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.COMMITER_AND_TAGGER_APP_ID }}
+          private-key: ${{ secrets.COMMITER_AND_TAGGER_APP_PRIVATE_KEY }}
+
+      - name: "Checkout Repository"
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # Full history for changelog generation
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: "Get GitHub App User ID"
+        id: get-user-id
+        run: |
+          echo "user-id=$(gh api "/users/${{ steps.app-token.outputs.app-slug }}[bot]" --jq .id)" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: "Extract Tool Versions"
+        id: versions
+        uses: ./.github/actions/extract-versions
+
+      - name: "Get Previous Tag"
+        id: previoustag
+        run: |
+          # Get the previous tag for changelog generation
+          PREVIOUS_TAG=$(git tag --sort=-version:refname | sed -n '2p')
+          if [ -z "$PREVIOUS_TAG" ]; then
+            # If no previous tag, use first commit
+            PREVIOUS_TAG=$(git rev-list --max-parents=0 HEAD)
+          fi
+          echo "tag=${PREVIOUS_TAG}" >> $GITHUB_OUTPUT
+          echo "::notice::Previous tag: ${PREVIOUS_TAG}"
+
+      - name: "Generate Changelog"
+        uses: requarks/changelog-action@v1
+        id: changelog
+        with:
+          token: ${{ github.token }}
+          tag: ${{ github.ref_name }}
+          fromTag: ${{ steps.previoustag.outputs.tag }}
+          writeToFile: true
+          changelogFilePath: CHANGELOG.md
+          includeInvalidCommits: false
+          excludeTypes: "build,docs,other,style"
+
+      - name: "Generate Release Notes"
+        id: release_notes
+        run: |
+          # Create comprehensive release notes
+          cat > release-notes.md << 'EOF'
+          ## 🚀 Release ${{ github.ref_name }}
+
+          ### 📦 Container Images
+
+          Pull this release using any of the following registries:
+
+          ```bash
+          # Docker Hub
+          docker pull docker.io/kholisrag/argocd-ksops-helm-secrets:${{ github.ref_name }}
+
+          # GitHub Container Registry
+          docker pull ghcr.io/kholisrag/argocd-ksops-helm-secrets:${{ github.ref_name }}
+
+          # Quay.io
+          docker pull quay.io/kholisrag/argocd-ksops-helm-secrets:${{ github.ref_name }}
+          ```
+
+          ### 🔧 Tool Versions
+
+          This release includes the following tool versions:
+
+          | Tool | Version |
+          |------|---------|
+          | **ArgoCD** | `${{ steps.versions.outputs.argocd_version }}` |
+          | **ksops** | `${{ steps.versions.outputs.ksops_version }}` |
+          | **age** | `${{ steps.versions.outputs.age_version }}` |
+          | **helm-secrets** | `${{ steps.versions.outputs.helm_secrets_version }}` |
+          | **sops** | `${{ steps.versions.outputs.sops_version }}` |
+          | **kubectl** | `${{ steps.versions.outputs.kubectl_version }}` |
+          | **vals** | `${{ steps.versions.outputs.vals_version }}` |
+          | **static-curl** | `${{ steps.versions.outputs.static_curl_version }}` |
+
+          ### 🔒 Security & Supply Chain
+
+          - ✅ **Trivy Scanned**: No HIGH or CRITICAL vulnerabilities
+          - ✅ **SBOM Included**: Software Bill of Materials attached as attestation
+          - ✅ **Provenance**: Build provenance with `mode=max`
+          - ✅ **Multi-arch**: Supports `linux/amd64` and `linux/arm64`
+
+          ### 📝 Changelog
+
+          EOF
+
+          # Append the generated changelog
+          cat CHANGELOG.md >> release-notes.md
+
+          # Output for GitHub release
+          echo "notes_file=release-notes.md" >> $GITHUB_OUTPUT
+
+      - name: "Commit and Push Changelog"
+        uses: stefanzweifel/git-auto-commit-action@v5
+        id: auto-commit
+        with:
+          commit_message: "docs: update CHANGELOG.md for ${{ github.ref_name }} [skip ci]"
+          commit_user_name: "${{ steps.app-token.outputs.app-slug }}[bot]"
+          commit_user_email: "${{ steps.get-user-id.outputs.user-id }}+${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com"
+          commit_author: "${{ steps.app-token.outputs.app-slug }}[bot] <${{ steps.get-user-id.outputs.user-id }}+${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com>"
+          file_pattern: "CHANGELOG.md"
+          skip_dirty_check: false
+          skip_fetch: false
+          skip_checkout: false
+          disable_globbing: false
+          create_branch: false
+
+      - name: "Create GitHub Release"
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}
+          generate_release_notes: false
+          make_latest: "true"
+
+      - name: "Generate Release Summary"
+        run: |
+          echo "## 🎉 Release ${{ github.ref_name }} Created" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Image Locations" >> $GITHUB_STEP_SUMMARY
+          echo "- Docker Hub: \`docker.io/kholisrag/argocd-ksops-helm-secrets:${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- GHCR: \`ghcr.io/kholisrag/argocd-ksops-helm-secrets:${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Quay.io: \`quay.io/kholisrag/argocd-ksops-helm-secrets:${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔧 Tool Versions" >> $GITHUB_STEP_SUMMARY
+          echo "- ArgoCD: ${{ steps.versions.outputs.argocd_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🔗 [View Release](https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }})" >> $GITHUB_STEP_SUMMARY
