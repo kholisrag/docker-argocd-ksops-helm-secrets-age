@@ -1,6 +1,6 @@
 # Docker ArgoCD + ksops + helm-secrets + age
 
-This Docker Image is designed to facilitate the use of ArgoCD with ksops, helm-secrets, and age for managing Kubernetes deployments with encrypted secrets on both kustomize + helm methods.
+This Docker Image is designed to facilitate the use of ArgoCD with ksops + helm-secrets, with sops + age + vals for managing Kubernetes deployments with encrypted secrets on both kustomize + helm methods, so we can leverage the benefits of GitOps with ArgoCD on the Declarative approach with secrets encrypted in the respective git repository alongside the manifests.
 
 ## Tools Included
 
@@ -37,15 +37,8 @@ Images are tagged using a priority-based strategy:
 - `edge` - Latest development build from main branch
 - `nightly` - Daily automated builds
 - `v{version}` - Semantic versioned releases
+- `v{version}-{commit}` - Versioned releases with commit hash (main builds)
 - `sha-{commit}` - Specific commit builds
-
-## Security & Supply Chain
-
-All images include:
-
-- ✅ **SBOM (Software Bill of Materials)** - Attestations included
-- ✅ **Provenance** - Build provenance with mode=max
-- ✅ **Multi-arch Support** - linux/amd64 and linux/arm64
 
 ## CI/CD Workflows
 
@@ -57,7 +50,7 @@ This repository uses GitHub Actions for automated building, testing, and releasi
 - **Conventional Commits** - PR validation and automatic versioning
 - **Release Automation** - Automatic changelog generation
 - **Multi-Registry Publishing** - Docker Hub, GHCR, Quay.io
-- **Build Revisions** - Customizable build versions (0, 1, 2, -rc1, -beta1, etc.)
+- **Build Revisions** - Customizable build versions (0, 1, 2, -rc1, -beta1, etc.) (Note: not yet end-to-end tested)
 - **Local Testing** - Test workflows locally with nektos/act (NOTE: limited support / many known issues)
 
 ## Version Management
