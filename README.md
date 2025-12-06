@@ -4,13 +4,15 @@ This Docker Image is designed to facilitate the use of ArgoCD with ksops, helm-s
 
 ## Tools Included
 
-- argocd (main tool)
-- ksops
-- helm-secrets
-- age (for encryption/decryption)
-- kubectl
-- helm
-- kustomize
+- [argocd](https://github.com/argoproj/argo-cd) (main tool)
+- [ksops](https://github.com/viaduct-ai/kustomize-sops/)
+- [helm-secrets](https://github.com/jkroepke/helm-secrets/)
+- [sops](https://github.com/getsops/sops) (helper for ksops and helm-secrets)
+- [age](https://github.com/FiloSottile/age) (for encryption/decryption)
+- [kubectl](https://kubernetes.io/docs/reference/kubectl/) (kubernetes cli)
+- [helm](https://helm.sh/)
+- [kustomize](https://kubectl.docs.kubernetes.io/references/kustomize/)
+- [vals](https://github.com/helmfile/vals)
 
 ## Image Registries
 
@@ -36,7 +38,6 @@ Images are tagged using a priority-based strategy:
 - `nightly` - Daily automated builds
 - `v{version}` - Semantic versioned releases
 - `sha-{commit}` - Specific commit builds
-- `{argocd_version}_{build_version}_{sha}` - Full version info tags
 
 ## Security & Supply Chain
 
