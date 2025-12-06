@@ -50,6 +50,7 @@ This repository uses GitHub Actions for automated building, testing, and releasi
 - **Conventional Commits** - PR validation and automatic versioning
 - **Release Automation** - Automatic changelog generation
 - **Multi-Registry Publishing** - Docker Hub, GHCR, Quay.io
+- **End-to-End Testing** - Validates image functionality post-build using [kind](https://kind.sigs.k8s.io/) + [argocd-deployment](./e2e/argocd/) + [tests-manifests](./e2e/tests/)
 - **Build Revisions** - Customizable build versions (0, 1, 2, -rc1, -beta1, etc.) (Note: not yet end-to-end tested)
 - **Local Testing** - Test workflows locally with nektos/act (NOTE: limited support / many known issues)
 
@@ -73,7 +74,9 @@ Tool versions are managed centrally in the `.tool-versions` file, which serves a
    vals 0.42.6
    ```
 
-2. Run the sync workflow to update Dockerfile, or manually update ARG declarations in `Dockerfile`
+#### Method 2: [Check Tools Version Action](./.github/workflows/check-tools-version.yaml)
+
+1. This GitHub Action automatically checks for the latest versions of the tools defined in `.tool-versions` on a scheduled basis (daily at 01:00 UTC) or can be triggered manually via workflow dispatch.
 
 ## Contributing
 
