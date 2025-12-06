@@ -15,6 +15,10 @@ on:
 
 permissions:
   contents: write
+  packages: write
+  id-token: write
+  attestations: write
+  security-events: write
 
 jobs:
   check-versions:
@@ -143,3 +147,20 @@ jobs:
           echo "| age | ${{ steps.current.outputs.age_version }} | ${{ steps.latest_age.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
           echo "| helm-secrets | ${{ steps.current.outputs.helm_secrets_version }} | ${{ steps.latest_helm_secrets.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
           echo "| static-curl | ${{ steps.current.outputs.static_curl_version }} | ${{ steps.latest_static_curl.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
+
+  # Trigger build with updated versions if updates are detected
+  trigger-build:
+    needs: check-versions
+    if: needs.check-versions.outputs.has_updates == 'true'
+    uses: ./.github/workflows/build-and-push.yaml
+    with:
+      argocd_version: ${{ fromJson(needs.check-versions.outputs.updates_json).argocd_version }}
+      ksops_version: ${{ fromJson(needs.check-versions.outputs.updates_json).ksops_version }}
+      age_version: ${{ fromJson(needs.check-versions.outputs.updates_json).age_version }}
+      helm_secrets_version: ${{ fromJson(needs.check-versions.outputs.updates_json).helm_secrets_version }}
+      sops_version: ${{ fromJson(needs.check-versions.outputs.updates_json).sops_version }}
+      kubectl_version: ${{ fromJson(needs.check-versions.outputs.updates_json).kubectl_version }}
+      vals_version: ${{ fromJson(needs.check-versions.outputs.updates_json).vals_version }}
+      static_curl_version: ${{ fromJson(needs.check-versions.outputs.updates_json).static_curl_version }}
+      skip_e2e: false
+    secrets: inherit
