@@ -24,6 +24,17 @@ on:
       - main
     tags:
       - "v*"
+    paths-ignore:
+      - "README.md"
+      - "*.md"
+      - ".sops.yaml"
+      - "CODEOWNERS"
+      - "LICENSE"
+      - ".actrc"
+      - ".vscode/**"
+      - ".act/**"
+      - "docs/**"
+
   workflow_dispatch:
     inputs:
       argocd_version:
