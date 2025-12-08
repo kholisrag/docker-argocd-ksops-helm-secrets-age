@@ -8,10 +8,8 @@ name: "Github Release"
 # - Creates GitHub release with artifacts
 # - Marks pre-releases automatically (tags with -rc, -alpha, -beta)
 #
-# Triggered when a new tag matching v* is pushed
-# Example: git tag -a v1.2.3 -m "Release v1.2.3" && git push origin v1.2.3
-
-# Triggered when a new tag is pushed
+# Triggers:
+# - Push tags v* for versioned releases
 on:
   push:
     tags:

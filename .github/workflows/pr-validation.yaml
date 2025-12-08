@@ -8,11 +8,13 @@ name: "PR Validation and Build"
 # - Comments on PR with image details and tool versions
 # - Calculates semantic version bump based on commit type
 #
+# Triggers:
+# - Pull requests to main branch (opened, synchronize, reopened, edited)
+#
+# Note:
 # Required PR title format: type(scope?): description
 # Valid types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert
 # Example: feat(api): add new authentication endpoint
-
-# Only run on pull requests to validate conventional commits and optionally build RC images
 on:
   pull_request:
     branches:

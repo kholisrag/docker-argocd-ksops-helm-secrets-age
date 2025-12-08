@@ -3,21 +3,21 @@ name: "Build and Push Container Image"
 # This workflow builds, scans, and publishes Docker images to multiple registries
 # Features:
 # - Extracts tool versions from Dockerfile for tagging
-# - Trivy security scanning (blocks on HIGH/CRITICAL vulnerabilities)
+# - Trivy security scanning (non-blocking, reports findings)
 # - Multi-platform builds (amd64, arm64)
 # - SBOM and provenance attestations
 # - Priority-based tagging strategy with ArgoCD version as primary
 # - Pushes to Docker Hub, GHCR, and Quay.io
 #
 # Triggers:
-# - Daily schedule (8 AM UTC) for nightly builds
+# - Daily schedule (2 AM UTC) for nightly builds
 # - Push to main branch for edge/latest tags
 # - Push tags v* for versioned releases
 # - Manual workflow_dispatch
 
 on:
   schedule:
-    # Daily nightly build at 1 AM UTC
+    # Daily nightly build at 2 AM UTC
     - cron: "0 2 * * *"
   push:
     branches:

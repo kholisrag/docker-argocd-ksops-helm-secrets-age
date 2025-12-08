@@ -1,5 +1,11 @@
 name: "End to End Tests with Kind + ArgoCD"
 
+# This workflow runs End-to-End tests by:
+# 1. Creating a local Kind cluster
+# 2. Installing ArgoCD with the custom image
+# 3. Deploying test applications (Podinfo)
+# 4. Verifying correct deployment and secret injection (ksops/age)
+
 on:
   workflow_dispatch:
     inputs:
@@ -41,6 +47,9 @@ on:
 jobs:
   e2e-tests:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      statuses: write
     outputs:
       e2e_tests_status: ${{ steps.e2e-tests-outcome.outputs.e2e_tests_status }}
       image_tag: ${{ inputs.image_tag }}
@@ -375,3 +384,18 @@ jobs:
           echo "### Test Results" >> $GITHUB_STEP_SUMMARY
           echo "- Replica Count: ${{ steps.check-replica-count.outputs.replica_count }}/2" >> $GITHUB_STEP_SUMMARY
           echo "- Environment Variables: ${{ steps.e2e-tests-outcome.outputs.e2e_tests_status == 'passed' && '✅ Passed' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Update GitHub Status
+        if: always()
+        uses: octokit/request-action@v2
+        with:
+          route: POST /repos/{owner}/{repo}/statuses/{sha}
+          owner: ${{ github.repository_owner }}
+          repo: ${{ github.event.repository.name }}
+          sha: ${{ github.sha }}
+          state: ${{ steps.e2e-tests-outcome.outputs.e2e_tests_status == 'passed' && 'success' || 'failure' }}
+          context: "E2E Tests"
+          description: "End-to-end tests status"
+          target_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

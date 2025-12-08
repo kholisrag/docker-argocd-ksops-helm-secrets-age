@@ -2,6 +2,14 @@ name: "Inspect Image and Update Tool Versions"
 
 # This workflow inspects a Docker image to extract tool versions from labels
 # and updates the .tool-versions file if the versions have changed
+#
+# Features:
+# - Extracts tool versions from Docker image labels
+# - Updates .tool-versions file automatically
+# - Commits changes back to the repository
+#
+# Triggers:
+# - Called by build-and-push.yaml after successful E2E tests
 
 on:
   workflow_call:
