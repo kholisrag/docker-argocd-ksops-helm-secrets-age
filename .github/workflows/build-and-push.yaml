@@ -155,6 +155,7 @@ permissions:
   id-token: write
   attestations: write
   security-events: write
+  statuses: write
 
 jobs:
   build-and-push:
