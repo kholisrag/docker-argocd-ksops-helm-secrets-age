@@ -1,5 +1,5 @@
 age 1.2.1
-argocd 3.2.2
+argocd 3.2.3
 helm-secrets 4.7.4
 ksops 4.4.0
 kubectl 1.35.0
