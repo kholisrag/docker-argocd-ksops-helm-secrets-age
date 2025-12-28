@@ -1,4 +1,4 @@
-age 1.2.1
+age 1.3.0
 argocd 3.2.3
 helm-secrets 4.7.4
 ksops 4.4.0
