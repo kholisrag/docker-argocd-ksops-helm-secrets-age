@@ -5,4 +5,4 @@ ksops 4.4.0
 kubectl 1.35.0
 sops 3.11.0
 static-curl 8.17.0
-vals 0.42.6
+vals 0.43.0
